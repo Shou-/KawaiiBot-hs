@@ -47,6 +47,10 @@ Takes one integer as an argument, or several strings separated by `|` (pipe).
 Prints weather information for the specified location.
 Takes one string argument.
 
+* `.lewd`
+Prints a random string from the file as defined in `Config.hs`.
+Takes zero arguments.
+
 ## Operators
 * `>>`
 Bind, it executes the function on the left but ignores the output, and continues parsing the right.
@@ -58,8 +62,9 @@ Pipe, it appends the output of the function on the left into the function on the
 Add, it appends the string of the output on the right to the output on the left.
 
 ## .lewd
-The format for the lewd function is currently looking something like this:
+The format for the lewd function's file is currently looking something like this:
 ```
 "Hey! This is a string! Woohoo~ \ETX04\x2665\ETX"
+"It's another string! They are separated by newlines."
 ```
 Where `\ETX` is the character needed to color text over IRC and `\x2665` is the unicode 'black heart' character.
