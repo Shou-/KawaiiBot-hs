@@ -4,7 +4,7 @@ Synopsis:           A lewd IRC bot that performs Otaku related tasks.
 Author:             Shou
 Maintainer:         gnusokyo@gmail.com
 Copyright:          Shou
-License:            LGPL
+License:            GPL-2
 License-File:       LICENSE
 Cabal-Version:      >= 1.2
 Build-Type:         Simple

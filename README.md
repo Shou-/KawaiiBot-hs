@@ -12,7 +12,7 @@ variablePath = "/filepath/filename"
 -- Phrases need to be added manually; see below.
 lewdPath = "/filepath/filename"
 -- This is to be able to use Bing Translate.
-msAppId
+msAppId = "key"
 ```
 
 To install, run `cabal install`.
