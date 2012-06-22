@@ -1,0 +1,37 @@
+name:               KawaiiBot
+version:            0.1
+Synopsis:           A lewd IRC bot that performs Otaku related tasks.
+Author:             Shou
+Maintainer:         gnusokyo@gmail.com
+Copyright:          Shou
+License:            LGPL
+License-File:       LICENSE
+Cabal-Version:      >= 1.2
+Build-Type:         Simple
+
+Executable kawaiibot-client
+    Build-Depends:
+        base,
+        cgi,
+        curl,
+        directory,
+        HTTP,
+        json,
+        MissingH,
+        network,
+        process,
+        random,
+        regex-compat,
+        strict,
+        utf8-string,
+        xml,
+        text
+    Main-Is:
+        Main.hs
+
+Executable kawaiibot-core
+    Build-Depends:
+        text,
+        time
+    Main-Is:
+        Core.hs
