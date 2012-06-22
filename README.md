@@ -48,13 +48,13 @@ Prints weather information for the specified location.
 Takes one string argument.
 
 ## Operators
-* >>
+* `>>`
 Bind, it executes the function on the left but ignores the output, and continues parsing the right.
 
-* ->
+* `->`
 Pipe, it appends the output of the function on the left into the function on the right.
 
-* ++
+* `++`
 Add, it appends the string of the output on the right to the output on the left.
 
 ## .lewd
