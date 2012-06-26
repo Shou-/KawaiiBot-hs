@@ -1,0 +1,31 @@
+
+module Config where
+
+import Utils
+
+-- Paths
+storagePath     = "/home/hatate/irc/"
+variablePath    = storagePath ++ "variables"
+lewdPath        = storagePath ++ "lewds"
+logPath         = storagePath ++ "logs/"
+
+-- Bing translate AppId
+msAppId         = ""
+
+-- list of servers
+servers         = [ Server { serverURL = "irc.freenode.nett"
+                           , serverChans = ["#mychannel"]
+                           , serverPort = 6667
+                           , serverNick = "Cute_bot"
+                           }
+                  , Server { serverURL = "some.other.server"
+                           , serverNick = "Qt_bot"
+                           }
+                  ]
+
+-- Website title fetching
+titleFetching   = True
+-- Log messages to file
+msgLogging      = True
+-- Debug messages
+debug           = True

@@ -12,9 +12,8 @@ Build-Type:         Simple
 Executable kawaiibot-client
     Build-Depends:
         base,
-        cgi,
         curl,
-        directory,
+        cgi,
         HTTP,
         json,
         MissingH,
@@ -22,16 +21,16 @@ Executable kawaiibot-client
         process,
         random,
         regex-compat,
-        strict,
+        text,
         utf8-string,
-        xml,
-        text
+        xml
     Main-Is:
         Main.hs
 
 Executable kawaiibot-core
     Build-Depends:
         text,
-        time
+        time,
+        directory
     Main-Is:
         Core.hs

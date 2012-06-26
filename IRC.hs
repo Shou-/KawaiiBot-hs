@@ -16,17 +16,18 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -}
 
-{-# LANGUAGE DoAndIfThenElse, MultiParamTypeClasses, TypeSynonymInstances, FlexibleInstances #-}
+{-# LANGUAGE DoAndIfThenElse #-}
 
 module IRC where
 
 
 import Bot
+import Config
 import Utils
 
 import Control.Concurrent
 import Control.Exception
-import Control.Monad (forever, forM_, unless)
+import Control.Monad hiding (join)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Data.Maybe (fromJust, listToMaybe)
@@ -76,14 +77,26 @@ parse h meta bs = do
 
                     meta' = Meta dest nick name host channels serverurl ownnick
 
-                forkIO $ do
-                    (mAct, mMsg) <- msgInterpret meta' msg
-                    let mAct' = if mAct then "PRIVMSG " ++ dest else "PRIVMSG " ++ nick
-                    unless (null mMsg) . write h meta' $ mAct' ++ " :" ++ mMsg
-                forkIO $ do
+                when urlFetching . void . forkIO $ do -- URL fetching
                     let urls = filter (\x -> if take 4 x `elem` ["http"] then True else False) $ words msg
                     forM_ urls $ \url -> title url >>= \title' -> unless (null title') . write h meta' $ "PRIVMSG " ++ dest ++ " :\ETX5Title\ETX: " ++ title'
-                event h "PRIVMSG" meta'
+
+                post <- msgInterpret meta' msg
+                let mAct = if isChannelMsg post
+                        then "PRIVMSG " ++ dest
+                        else "PRIVMSG " ++ nick
+                    msg' = fromMsg post
+
+                unless (null msg') . write h meta' $ mAct ++ " :" ++ msg'
+
+                when msgLogging $ do -- logging
+                    e <- try (do
+                        let path = logPath ++ serverurl ++ " " ++ dest
+                        appendFile path $ show (args, msg) ++ "\n") :: IO (Either SomeException ())
+                    case e of
+                        Right _ -> return ()
+                        Left e -> when debug $ print e
+
                 return ()
             | args !! 3 == "INVITE" = do -- Join a channel on invite
                 let nick = args !! 0
@@ -96,6 +109,9 @@ parse h meta bs = do
                     ownnick = getOwnNick meta
 
                     meta' = Meta dest nick name host channels serverurl ownnick
+
+                -- print reminder message if any
+
                 -- check this channel against a list of banned ones or something
                 write h meta' $ "JOIN " ++ msg
                 return ()
@@ -108,10 +124,11 @@ parse h meta bs = do
                     dest = args !! 4
 
                 return ()
-            | args !! 3 == "JOIN" = do -- Single nicklist update
+            | args !! 3 == "JOIN" = do
                 let nick = args !! 0
                     dest = msg
 
+                -- get :reminder variable
                 return ()
             | args !! 3 == "QUIT" = do -- Full nicklist update
                 let nick = args !! 0

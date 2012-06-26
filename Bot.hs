@@ -16,21 +16,22 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -}
 
-{-# LANGUAGE DoAndIfThenElse, MultiParamTypeClasses, TypeSynonymInstances, FlexibleInstances #-}
+{-# LANGUAGE DoAndIfThenElse #-}
 
 module Bot where
 
 import Utils
 import Config
 
-import Codec.Binary.UTF8.String (decodeString)
 import Control.Exception
+import Control.Monad hiding (join)
+import qualified Control.Monad as M
 import Data.List (isInfixOf)
 import Data.Foldable (foldr')
 import Data.Maybe (fromJust, listToMaybe)
-import Data.String.Utils (split, join, strip, replace)
+import Data.String.Utils
 import Network.Curl
-import System.IO (Handle)
+import System.IO
 import System.Random (randomRIO)
 import Text.Regex (subRegex, mkRegex)
 import Text.JSON
@@ -39,94 +40,87 @@ import Text.XML.Light
 -- Interpret messages and change the data into whatever the functions return
 -- Splits the message on bind operators and uses recursion to execute all as separate functions
 -- The boolean returned decides whether it's a destination message (True) or user message (False).
-msgInterpret :: Meta -> String -> IO (Bool, String)
+msgInterpret :: Meta -> String -> IO Message
 msgInterpret meta str =
     if words str /= [] then do
-        let carg    = split ":" $ (!! 0) $ words str
-            cmd     = (!! 0) carg
+        let cmd     = takeWhile (/= ':') $ takeWhile (/= ' ') str
+            carg    = concat . fmap (split ":") . take 1 . words $ str
             smesg   = unwords . takeWhile notAnyOper . tail $ words str
             opers   = dropWhile notAnyOper $ words str
-            postIO :: String -> IO (Bool, String)
+            postIO :: String -> IO Message
             postIO x
                 | x `isFunc` [">"] = -- Public message
-                    return (True, smesg)
+                    return $ ChannelMsg smesg
                 | x `isFunc` ["<"] = -- Private message
-                    return (False, smesg)
-                | x `isFunc` ["alias"] = -- Alias
-                    return (True, [])
+                    return $ UserMsg smesg
                 | x `isFunc` ["calc"] = -- Calculator
-                    return (calc smesg) >>= return . (tuple2 True)
+                    return (calc smesg) >>= return . ChannelMsg
                 | x `isFunc` ["help", "?"] = -- Help about commands
-                    return (False, help smesg)
+                    return . UserMsg $ help smesg
                 | x `isFunc` ["lewd"] = -- Lewd messages
-                    lewd meta >>= return . (tuple2 False)
+                    lewd meta >>= return . UserMsg
                 | x `isFunc` ["wiki"] = -- Wikipedia summary
-                    wiki smesg >>= return . (tuple2 True)
-                | x `isFunc` ["sed"] = -- Regex replace
-                    return (True, sed smesg)
+                    wiki smesg >>= return . ChannelMsg
+                | x `isFunc` ["sed"] = do -- Regex replace
+                    e <- try (return $ sed smesg) :: IO (Either SomeException String)
+                    case e of
+                        Right e -> return $ ChannelMsg e
+                        Left e -> print e >> return EmptyMsg
                 | x `isFunc` ["ai"] = -- Recently airing anime
-                    airing carg >>= return . (tuple2 True)
+                    airing carg >>= return . ChannelMsg
                 | x `isFunc` ["an"] = -- Recent anime / anime search
-                    anime smesg carg >>= return . (tuple2 True)
-                | x `isFunc` ["fi"] = -- Filter
-                    return (True, [])
+                    anime smesg carg >>= return . ChannelMsg
                 | x `isFunc` ["ma"] = -- Recent manga / manga search
-                    smesg `manga` carg >>= return . (tuple2 True)
-                | x `isFunc` ["pi"] = -- Pickpocket
-                    return (True, [])
+                    manga smesg carg >>= return . ChannelMsg
                 | x `isFunc` ["ra"] = -- Random/choice
-                    random smesg >>= return . (tuple2 True)
+                    random smesg >>= return . ChannelMsg
                 | x `isFunc` ["$"] = -- Variable storing
-                    variable meta carg (bisectAt ' ' smesg) >>= return . (tuple2 True)
-                | x `isFunc` ["re"] = -- Reminder, alias for $
-                    variable meta ["$", "reminder"] (getUsernick meta ++ "-reminder", smesg) >>= return . (tuple2 True)
+                    variable meta carg (bisectAt ' ' smesg) >>= return . ChannelMsg
                 | x `isFunc` ["tr"] = -- Translate
-                    translate carg smesg >>= return . (tuple2 True)
-                | x `isFunc` ["us"] = -- Userlist
-                    return (False, []) -- (True, userlistShow meta)
+                    translate carg smesg >>= return . ChannelMsg
                 | x `isFunc` ["we"] = -- Weather
-                    weather smesg >>= return . (tuple2 True)
+                    weather smesg >>= return . ChannelMsg
                 | x `isFunc` ["^"] = -- Last message / message history
-                    lastMsg meta smesg >>= return . (tuple2 True)
-                | head x == '\SOH' = -- CTCP interpreter
-                    return . (tuple2 False) $ ctcpInterpret str
+                    lastMsg meta smesg >>= return . ChannelMsg
+                | isCTCP x = -- CTCP message
+                    let xs = tail x
+                    in case () of
+                      _ | take 7 (tail x) == "VERSION" -> return . UserMsg $ "VERSION "++ botversion
+                        | otherwise -> return EmptyMsg
                 | otherwise = -- Fallback
-                    print str >> return (True, [])
-            handlebinds :: [String] -> IO (Bool, String)
+                    print str >> return EmptyMsg
+            handlebinds :: [String] -> IO Message
             handlebinds [] = postIO cmd
             handlebinds (x:xs)
                 | x == ">>" = do
-                    (_, post) <- postIO cmd
-                    let act     = unwords xs
-                    putStrLn $ "Act: " ++ show act ++ "\nPost: " ++ show post
+                    -- add laziness to this
+                    -- check if it's necessary to execute it or not
+                    post <- fmap fromMsg $ postIO cmd
+                    let act = unwords xs
+                    when debug $ putStrLn $ "Act: " ++ show act ++ "\nPost: " ++ show post
                     msgI <- msgInterpret meta act
                     return msgI
                 | x == "->" = do
-                    (_, post) <- postIO cmd
+                    post <- fmap fromMsg $ postIO cmd
                     let func     = unwords . takeWhile notAnyOper $ xs
                         funcTail = unwords . dropWhile notAnyOper $ xs
                     putStrLn $ "Act: " ++ show func ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show funcTail
                     msgI <- msgInterpret meta $ func ++ ' ' : post ++ ' ' : funcTail
                     return msgI
                 | x == "++" = do
-                    (_, post) <- postIO cmd
+                    post <- fmap fromMsg $ postIO cmd
                     let add     = unwords . takeWhile notAnyOper $ xs
                         addTail = (' ':) . unwords . dropWhile notAnyOper $ xs
                     putStrLn $ "Act: " ++ show add ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show addTail
-                    (msgI1, msgI2) <- msgInterpret meta $ add ++ addTail
-                    return (msgI1, post ++ " " ++ msgI2)
+                    msgI <- msgInterpret meta $ add ++ addTail
+                    return (msgType msgI $ post ++ " " ++ fromMsg msgI)
                 | otherwise = postIO cmd
         handlebinds opers
-    else return (True, [])
-  where notAnyOper        = (\x -> not $ x `elem` [">>", "->", "++"])
-        tuple2 x y = (x, y)
+    else return EmptyMsg
+  where notAnyOper = (\x -> not $ x `elem` [">>", "->", "++"])
         isFunc x y = x `elem` [v : y' | y' <- y, v <- ['.', '!']]
-
-ctcpInterpret :: String -> String
-ctcpInterpret ('\SOH':xs)
-    | take 7 xs == "VERSION" = "VERSION KawaiiBot 0.1"
-    | otherwise = []
-ctcpInterpret _ = []
+        isCTCP ('\SOH':xs) = True
+        isCTCP _ = False
 
 -- Holy fukc this sucks
 -- Regex replace function for msgInterpret
@@ -188,7 +182,7 @@ airing args = do
         genAnime _                   = []
 
 -- calculator function
--- This needs to be rewritten to work without spaces and ().
+-- This needs to be rewritten to work without spaces, () and not be terrible.
 calc :: String -> String
 calc _ = [] -- temporary, until it gets fixed
 calc [] = []
@@ -211,34 +205,38 @@ calc x' =
 help :: String -> String
 help s
     | s == "bind"       = "Bind, or >>, is an operator that performs the function preceding it, but disregards the value returned."
-    | s == "calc"       = "Calculates some numbers with a horrible function which only vaguely follows the order of operation. Ex: .calc 2 + 5 * 2"
     | s == "lewd"       = "Prints a lewd message."
     | s == "pipe"       = "Pipe, or ->, is an operator that takes the value of what precedes it and appends it to the argument of the next function."
-    | s == "wiki"       = "Prints the top of a Wikipedia article. Ex: .wiki haskell programming language"
     | s == "add"        = "Add, or ++, is an operator that takes the value of what precedes it and appends it to the value of the next function."
     | s == "sed"        = "Replaces text using regular expressions. Ex: .sed /probably should/should not/ You probably should help it."
     | s == "ai"         = "Prints anime airing in the near future. Ex: .ai:10"
     | s == "an"         = "Prints recent anime releases, can also be used to search. Ex: .an:3 Last Exile -Commie"
     | s == "ma"         = "Prints recent manga releases, can also be used to search. Ex: .ma:5 Banana no Nana"
     | s == "ra"         = "Prints a number from a range or a string choice split by `|'. Ex: .ra 1000; Ex: .ra Yes | No"
-    | s == "re"         = "An alias for .$:reminder reminder-%(nick). Ex: .re Watch Welcome to the NHK."
     | s == "tr"         = "Translate a string. Ex: .tr:ja:en 日本語"
     | s == "we"         = "Prints the weather for a specified location. Ex: .we Tokyo"
     | s == ">"          = "Prints a string to the channel. Ex: .> hey"
     | s == "<"          = "Prints a string to the user. Ex: .< hey"
     | s == "^"          = "Gets a message from the history. Ex: .^ 3"
     | s == "$"          = "Gets a stored variable. Ex: .$:immutable myVariableName My variable message."
-    | otherwise         = "Try `.help' and a function: >, <, ^, $, calc, wiki, sed, ai, an, ma, ra, tr, us, we. Or an operator: bind, pipe, add."
+    | otherwise         = "Try `.help' and a function: >, <, ^, $, sed, ai, an, ma, ra, tr, we. Or an operator: bind, pipe, add."
 
 -- Read str as Int, or 0 if not number. Use it as an index for the history list. Fallback to `[]'.
 lastMsg :: Meta -> String -> IO String
-lastMsg meta str =
-    let history = []
-        len = length history
-        n = if isNum . strip $ str then read str else 0 :: Int
-    in if len > n
-        then return . (\(_, _, _, x) -> x) $ history !! n
-        else return []
+lastMsg meta str = do
+    let serverurl = getServer meta
+        dest = getDestino meta
+    e <- try (do
+        let path = logPath ++ serverurl ++ " " ++ dest
+        fmap (map (\x -> read x :: ([String], String)) . reverse . lines) $ readFile path) :: IO (Either SomeException [([String], String)])
+    case e of
+        Right history -> do
+            let len = length history
+                n = if isNum . strip $ str then read str else 0 :: Int
+            if len > n
+                then return . snd $ history !! n
+                else return []
+        Left e -> when debug (print e) >> return []
 
 -- Output lewd strings.
 lewd :: Meta -> IO String
@@ -321,7 +319,7 @@ title url = do
                             then (++ " ") . elemsText . head' . (fromJust specialElem) $ elems 
                             else []) `cutoff` 200
             pagetitle = ((special ++ " ") ++) . unwords . map elemsText $ getTitle
-        return . replace "\n" " " . istrip $ pagetitle
+        return . istrip . replace "\n" " " $ pagetitle
     else
         return []
   where specialElem :: Maybe (Element -> [Element])
@@ -363,69 +361,87 @@ translate args str = do
   where getOut (Ok (Just (JSString a))) = Just a
         getOut _ = Nothing
 
+-- rewrite `Variable'
+-- Add:
+---- Return specific variable (Reminder only, etc)
+------ Can be solved if you pass a function to it
+---- Private variables that are stored under the user's nick
+---- and Public variables that are owned by the channel, and duplicates cannot exist
+
 -- Variable
 -- YOU'RE WORKING ON THIS YOU だめ人間; FINISH THIS SHIT.
--- Need to work on the ``event'' function to finish this.
 variable :: Meta -> [String] -> (String, String) -> IO String
 variable meta [_] (varname, []) = do -- Read variable
-    file <- handle ((\_ -> return "") :: SomeException -> IO String)
-                   (readFile variablePath)
-    let nick = getUsernick meta
-        dest = getDestino meta
-        server = getServer meta
-        variables =
-            let maybeVariables = fmap fst . listToMaybe . reads $ file
-            in if maybeVariables /= Nothing
-                then fromJust maybeVariables
-                else []
-        dests = variables `tupleListGet` server
-        vars = dests `tupleListGet` dest
-        (_, nick', msg) = vars `tupleVarGet` varname
-    if msg /= EmptyVar
-        then if readableVar msg
-            then return . fromVariable $ msg
-            else if nick == nick'
-                then return . fromVariable $ msg
-                else return []
-        else return []
-variable meta args (varname, str) = do -- Set variable
-    contents <- handle ((\_ -> return "") :: SomeException -> IO String)
-                       (readFile variablePath)
-    let nick = getUsernick meta
-        dest = getDestino meta
-        server = getServer meta
-        variables = let maybeVariables = fmap fst . listToMaybe . reads $ contents
+    e <- (try $ openFile variablePath ReadMode 
+              >>= \h -> hGetContents h
+              >>= \f -> f `seq` hClose h
+              >> return f) :: IO (Either SomeException String)
+    case e of
+        Right file -> do
+            let nick = getUsernick meta
+                dest = getDestino meta
+                server = getServer meta
+                variables =
+                    let maybeVariables = fmap fst . listToMaybe . reads $ file
                     in if maybeVariables /= Nothing
                         then fromJust maybeVariables
                         else []
-        dests = variables `tupleListGet` server
-        vars = dests `tupleListGet` dest
-        (_, nick', msg) = vars `tupleVarGet` varname
+                dests = variables `tupleListGet` server
+                vars = dests `tupleListGet` dest
+                (_, nick', msg) = vars `tupleVarGet` varname
+            if msg /= EmptyVar
+                then if readableVar msg
+                    then return . fromVariable $ msg
+                    else if nick == nick'
+                        then return . fromVariable $ msg
+                        else return []
+                else return []
+        Left e -> print e >> return []
+variable meta args (varname, str) = do -- Set variable
+    e <- (try $ openFile variablePath ReadMode 
+               >>= \h -> hGetContents h
+               >>= \f -> f `seq` hClose h
+               >> return f) :: IO (Either SomeException String)
+    case e of
+        Right contents -> do
+            let nick = getUsernick meta
+                dest = getDestino meta
+                server = getServer meta
+                variables = let maybeVariables = fmap fst . listToMaybe . reads $ contents
+                            in if maybeVariables /= Nothing
+                                then fromJust maybeVariables
+                                else []
+                dests = variables `tupleListGet` server
+                vars = dests `tupleListGet` dest
+                (_, nick', msg) = vars `tupleVarGet` varname
 
-        vartype = if length args > 1 then バカ (args !! 1) else Regular
-        var = vartype str
+                vartype = if length args > 1 then バカ (args !! 1) else Regular
+                var = vartype str
 
-        nicks' = vars `tupleVarInject` (varname, nick, var)
-        dests' = (dest, nicks') `tupleInject` dests
-        variables' = (server, dests') `tupleInject` variables :: Variables
+                nicks' = vars `tupleVarInject` (varname, nick, var)
+                dests' = (dest, nicks') `tupleInject` dests
+                variables' = (server, dests') `tupleInject` variables :: Variables
 
-    if writeableVar $ msg
-        then putStrLn ("It's writeable: " ++ show variables') >>
-             writeVariables variables'
-        else if nick == nick'
-            then putStrLn ("Not writeable, but same user: " ++ show variables') >>
-                 writeVariables variables'
-            else putStrLn "Cannot overwrite variable." >> return []
+            if writeableVar msg
+                then putStrLn ("It's writeable: " ++ show variables') >>
+                     writeVariables variables'
+                else if nick == nick'
+                    then putStrLn ("Not writeable, but same user: " ++ show variables') >>
+                         writeVariables variables'
+                    else putStrLn "Cannot overwrite variable." >> return []
+        Left e -> print e >> return []
   where バカ ('p':'r':'i':_) = Personal
         バカ ('i':'m':'m':_) = Immutable
         バカ ('r':'e':'m':_) = Reminder
         バカ _               = Regular
         writeVariables :: Variables -> IO String
         writeVariables variables' = do
-            writeStatus <- try (writeFile variablePath $ show variables') :: IO (Either SomeException ())
+            writeStatus <- (try $ openFile variablePath WriteMode
+                                >>= \h -> hPutStrLn h (show variables')
+                                >> hClose h) :: IO (Either SomeException ())
             case writeStatus of
-                Left e -> return . show $ e
-                Right _ -> return ""
+                Right _ -> return []
+                Left e -> print e >> return []
 
 weather :: String -> IO String
 weather str = do
@@ -443,11 +459,6 @@ weather str = do
         formatCondition _ = []
         formatForecast [day, _, _, _, condition] = "\ETX05" ++ day ++ "\ETX: " ++ condition
         formatForecast _ = []
-
--- Event function
--- Incomplete
-event :: Handle -> String -> Meta -> IO ()
-event h meta str = return ()
 
 -- Wikipedia
 -- Incomplete -- fix this

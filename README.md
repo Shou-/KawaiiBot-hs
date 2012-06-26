@@ -4,19 +4,10 @@ KawaiiBot Haskell
 This is a Haskell rewrite of KawaiiBot.
 KawaiiBot is a lewd IRC bot that does useless things, such as checking the weather, grabbing information about anime and manga, and printing lewd messages.
 
-To use it, you need to create `Config.hs` and add some Haskell variables to it:
-```
--- This file just needs to exist for the .$ function to work.
-variablePath = "/filepath/filename"
--- The file containing strings printed by the `.lewd' function.
--- Phrases need to be added manually; see below.
-lewdPath = "/filepath/filename"
--- This is to be able to use Bing Translate.
-msAppId = "key"
-```
+See `Config.hs.example` for options.
 
 To install, run `cabal install`.
-To run, execute `kawaiibot-core` and `kawaiibot-client`.
+To run KawaiiBot, execute `kawaiibot-core` and `kawaiibot-client`.
 
 ## Functions
 * `.help`

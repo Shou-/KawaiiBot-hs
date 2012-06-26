@@ -58,12 +58,23 @@ instance PyFormat T.Text [(String, String)] where
 
 type Variables = [(String, [(String, [(String, String, Variable String)])])]
 
+data Message = ChannelMsg String
+             | UserMsg String
+             | EmptyMsg
+             deriving (Eq, Show)
+
 data Variable a = Regular a
                 | Personal a
                 | Immutable a
                 | Reminder a
                 | EmptyVar
                 deriving (Show, Read, Eq)
+
+data Server = Server { serverPort :: Int
+                     , serverURL :: String
+                     , serverChans :: [String]
+                     , serverNick :: String
+                     } deriving (Show, Read)
 
 data Meta = Meta {
     getDestino :: String,
@@ -77,6 +88,23 @@ data Meta = Meta {
 
 type HistMsg = (String, String, String, String)
 
+botversion = "KawaiiBot 0.1.1"
+
+-- Message utilities
+fromMsg (ChannelMsg x) = x
+fromMsg (UserMsg x) = x
+fromMsg EmptyMsg = []
+
+msgtype (UserMsg _) = UserMsg
+msgType _ = ChannelMsg
+
+isChannelMsg (ChannelMsg _) = True
+isChannelMsg _ = False
+
+-- Server utils
+getByServerURL :: [Server] -> String -> Maybe Server
+getByServerURL xs s = foldr f Nothing xs
+  where f = (\x acc -> if serverURL x == s then Just x else acc)
 
 cutoff :: String -> Int -> String
 cutoff s n = if length s > n then (take n s) ++ "..." else s

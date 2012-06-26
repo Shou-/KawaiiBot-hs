@@ -18,8 +18,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 {- Some of this is outdated since the Core rewrite
 TODO:
-    Make MODEs work properly.
-        Alternatively, strip functions that require MODEs entirely.
     Finish all the functions
         Finish the translate function
         Finish the wikipedia function
@@ -27,13 +25,11 @@ TODO:
         Add a dictionary lookup function
     Add more entries to help
     Function aliases
-    Ping timeout; if a PING hasn't been received within a certain timeframe, try reconnecting.
-    Fix all ``fix this'' commented blocks
-    Make msgInterpret return [String] instead of String? -- Strings are replaced by ByteStrings
-    Replace anonymous functions with named functions
-    Upload it to Github.
-        Replace old, move old source to a directory and eventually remove it completely when KawaiiBot Haskell is good enough.
+    Make msgInterpret return [String] instead of String?
+    Replace anonymous functions with named functions for readability?
     Add command line arguments, such as making it not autojoin any servers/channels and instead only join ones specified by a certain parameter.
+    `event' function that appends its output to an MVar at set times
+    Clean up Utils.hs
 
 FIXME:
     Rewrite the calc function
@@ -49,9 +45,6 @@ IMPORTANT:
 
 module Main where
 
-{-# LANGUAGE DoAndIfThenElse, MultiParamTypeClasses, TypeSynonymInstances,
-    FlexibleInstances #-}
-
 import Bot
 import Config
 import IRC
@@ -64,9 +57,9 @@ import Data.Maybe (fromJust, listToMaybe)
 import System.Environment (getArgs)
 import System.Process
 
-printHelp :: IO ()
-printHelp = do
-    putStrLn "KawaiiBot version 2012.06.19 16:29"
+printVersion :: IO ()
+printVersion = do
+    putStrLn botversion
 
 -- Opens the config file for reading and passes the data to concurrent
 -- serverConnect methods.
@@ -76,18 +69,18 @@ main = do
     if length args > 0
         then checkArg args
         else serverConnect
-  where checkArg x  | head x == "--help" = printHelp
+  where checkArg x  | head x == "--version" = printVersion
                     | head x == "--test" = mainTest
-                    | otherwise          = serverConnect
+                    | otherwise = serverConnect
 
 mainTest :: IO ()
-mainTest = forever $ getLine >>= msgInterpret meta >>= putStrLn . snd
+mainTest = forever $ getLine >>= msgInterpret meta >>= putStrLn . fromMsg
   where meta = Meta dest nick name host chans server ownnick
         dest = "#KawaiiBot"
-        nick = "Shou-"
-        name = "Shou"
-        host = "Tora.maru"
-        userlist = [('~', "Shou-"), ('&', "KawaiiBot")]
+        nick = "Owner"
+        name = "Owner"
+        host = "localhost"
+        userlist = [('~', "Owner"), ('&', "KawaiiBot")]
         chans = ["#KawaiiBot"]
         server = "localhost"
         ownnick = "KawaiiBot"

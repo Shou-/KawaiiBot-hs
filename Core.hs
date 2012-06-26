@@ -21,6 +21,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 module Main where
 
 import Utils
+import Config
 
 import Control.Exception
 import Control.Monad
@@ -44,14 +45,10 @@ import System.IO
 ---- Register with nickserv
 ------ Need password from destkop.
 
-type Client = (String, Handle)
-type Server = (String, Handle)
-type Message = (String, T.Text)
-type Timestamp = (String, Int)
-
--- Print debug messages
-debug :: Bool
-debug = True
+type CClient = (String, Handle)
+type CServer = (String, Handle)
+type CMessage = (String, T.Text)
+type CTimestamp = (String, Int)
 
 -- Simple function that writes to a handle
 -- and prints the bytestring
@@ -60,7 +57,7 @@ write h bs = T.hPutStrLn h bs >> T.putStrLn ('>' `T.cons` bs)
 
 -- Write to all open client handles
 -- Also return new list based on whether client is connected or not
-clientsWrite :: MVar [Client] -> T.Text -> IO ()
+clientsWrite :: MVar [CClient] -> T.Text -> IO ()
 clientsWrite mvar line = do
     when debug $ putStrLn "clientsWrite init..."
     hs <- takeMVar mvar
@@ -80,7 +77,7 @@ clientsWrite mvar line = do
         isJust _ = False
 
 -- loop that handles client connections and adds them to the MVar list
-socketlisten :: MVar [Client] -> Socket -> IO ()
+socketlisten :: MVar [CClient] -> Socket -> IO ()
 socketlisten mvar sock = do
     -- accept a socket
     (clientHandle, clientHost, _) <- accept sock
@@ -96,22 +93,22 @@ socketlisten mvar sock = do
     -- continue loop
     socketlisten mvar sock
 
-clientsLoop :: MVar [Server]
-            -> MVar [Timestamp]
-            -> [Client]
-            -> MVar [Client]
-            -> MVar [Message]
+clientsLoop :: MVar [CServer]
+            -> MVar [CTimestamp]
+            -> [CClient]
+            -> MVar [CClient]
+            -> MVar [CMessage]
             -> IO ()
 clientsLoop i p o s c =
     clientsListen i p o s c >>= \(i', p', o', s', c') -> clientsLoop i' p' o' s' c'
 
 -- 
-clientsListen :: MVar [Server] -- irc handles, passing on Text from clients
-              -> MVar [Timestamp] -- POSIX timestamp of latest message
-              -> [Client] -- old handles for writing to clients
-              -> MVar [Client] -- new handles for writing to clients
-              -> MVar [Message] -- Text received from client handles
-              -> IO (MVar [Server], MVar [Timestamp], [Client], MVar [Client], MVar [Message])
+clientsListen :: MVar [CServer] -- irc handles, passing on Text from clients
+              -> MVar [CTimestamp] -- POSIX timestamp of latest message
+              -> [CClient] -- old handles for writing to clients
+              -> MVar [CClient] -- new handles for writing to clients
+              -> MVar [CMessage] -- Text received from client handles
+              -> IO (MVar [CServer], MVar [CTimestamp], [CClient], MVar [CClient], MVar [CMessage])
 clientsListen serverMVar timeMVar oldSockHs sockMVar textMVar = do
     oldSockHs' <- readMVar sockMVar
     forM_ (filter (`notElem` oldSockHs) oldSockHs') $ \h -> do
@@ -129,7 +126,7 @@ clientsListen serverMVar timeMVar oldSockHs sockMVar textMVar = do
     forM_ ts handleMsg
     threadDelay 10
     return (serverMVar, timeMVar, oldSockHs', sockMVar, textMVar)
-  where handleMsg :: Message -> IO ()
+  where handleMsg :: CMessage -> IO ()
         handleMsg (_, clientText) = do
             ircHandles <- readMVar serverMVar
             let (action, message) = split1 ':' clientText
@@ -166,19 +163,19 @@ clientsListen serverMVar timeMVar oldSockHs sockMVar textMVar = do
         elemfst a ((x,_):xs) = if a == x then True else elemfst a xs
 
 -- Initialization for clientsLoop which loops clientsListen
-clientsInit :: MVar [Server]
-            -> MVar [Timestamp]
-            -> MVar [Client]
-            -> MVar [Message]
+clientsInit :: MVar [CServer]
+            -> MVar [CTimestamp]
+            -> MVar [CClient]
+            -> MVar [CMessage]
             -> IO ()
 clientsInit serverMVar timeMVar sockMVar textMVar = do
     chs <- readMVar sockMVar
     forM_ chs (forkIO . \h -> clientLoop h sockMVar textMVar)
     clientsLoop serverMVar timeMVar [] sockMVar textMVar
 
-clientLoop :: Client -- specific handle to read from
-           -> MVar [Client] -- MVar with client handles
-           -> MVar [Message] -- MVar to append Text gotten from handle
+clientLoop :: CClient -- specific handle to read from
+           -> MVar [CClient] -- MVar with client handles
+           -> MVar [CMessage] -- MVar to append Text gotten from handle
            -> IO ()
 clientLoop ch@(clientHost, clientHandle) sockMVar textMVar = do
     e <- try (T.hGetLine clientHandle) :: IO (Either SomeException T.Text)
@@ -190,7 +187,7 @@ clientLoop ch@(clientHost, clientHandle) sockMVar textMVar = do
             modifyMVar_ sockMVar (return . filter ((/=) clientHandle . snd))
 
 -- pass on messages from IRC to the clients in the MVar list
-ircListen :: Server -> MVar [Server] -> MVar [Timestamp] -> MVar [Client] -> IO ()
+ircListen :: CServer -> MVar [CServer] -> MVar [CTimestamp] -> MVar [CClient] -> IO ()
 ircListen server@(serverURL, serverHandle) serverMVar timeMVar clientMVar = do
     e <- try (T.hGetLine serverHandle) :: IO (Either SomeException T.Text)
     when debug $ print e
@@ -206,34 +203,29 @@ ircListen server@(serverURL, serverHandle) serverMVar timeMVar clientMVar = do
             print e
             when debug $ putStrLn "Closing handle..."
             hClose serverHandle
-            server' <- ircc (serverURL, 6667)
-            modifyMVar_ serverMVar (return . (server' :) . filter (/= server))
+            let server' = servers `getByServerURL` serverURL
+            case server' of
+                Just x -> do
+                    newserver <- ircc x
+                    modifyMVar_ serverMVar (return . (newserver :) . filter (/= server))
+                -- ABRA KADABRA! ヽ（ ﾟヮﾟ）ﾉ.・ﾟ*｡・+☆┳━┳
+                Nothing -> when debug . putStrLn $ "Server `" ++ serverURL ++ "' not in `servers'"
   where isPing :: T.Text -> Bool
         isPing x = T.take 4 x == (T.pack "PING")
 
 -- connect to an IRC server and return the handle
--- TODO: read this from a config file or something, prferably within main
-ircc :: (String, Int) -> IO Server
-ircc (server, port) = do
+ircc :: Server -> IO CServer
+ircc (Server port server chans nick) = do
     h <- connectTo server . PortNumber $ fromIntegral port
     hSetEncoding h utf8
     hSetBuffering h LineBuffering
     hSetNewlineMode h (NewlineMode CRLF CRLF)
-    forM_ (nick : user : chans) (write h . T.pack)
+    forM_ (nick' : user' : chans') (write h . T.pack)
     return (server, h)
-  where nick = "NICK KawaiiBot"
-        user = "USER KawaiiBot 0 * :KawaiiBot"
-        chans = map ("JOIN " ++) ["#KawaiiBot"]
-{-
--- What should the config look like?
-getConfig :: IO Something
-getConfig = do
-    home <- getHomeDirectory
-    e <- try (readFile $ home ++ "/.kawaiibot-core.conf") :: IO (Either SomeException String)
-    case e of
-        Right file ->
-        Left _ -> 
--}
+  where nick' = "NICK " ++ nick
+        user' = "USER " ++ nick ++ " 0 * :" ++ nick
+        chans' = map ("JOIN " ++) chans
+
 -- create some core data, connect to IRC servers and create the server socket
 main :: IO ()
 main = do
@@ -255,17 +247,10 @@ main = do
     forM_ hs (\h -> forkIO $ ircListen h serverMVar timeMVar sockMVar)
     _ <- forkIO $ clientsInit serverMVar timeMVar sockMVar inputMVar
     forever $ userInput serverMVar
-  where servers = [("irc.rizon.net", 6667)]
-
-startServer :: IO ()
-startServer = main
-
---serverMessage :: MVar [Server] -> IO ()
---serverMessage ::
 
 -- get direct input prefixed with the server URL and send, for example:
 -- irc.freenode.net:PRIVMSG #kawaiibot :This is a nice message!
-userInput :: MVar [Server] -> IO ()
+userInput :: MVar [CServer] -> IO ()
 userInput serverMVar = do
     hs <- readMVar serverMVar
     line <- T.getLine
