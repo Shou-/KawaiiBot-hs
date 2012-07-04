@@ -19,43 +19,56 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 {- Some of this is outdated since the Core rewrite
 TODO:
     Finish all the functions
-        Finish the translate function
-        Finish the wikipedia function
-        Fix the anime and airing functions
-        Add a dictionary lookup function
+        - Translate
+            - New Microsoft App ID fixes this.
+        - Dictionary
+        - Variable
+            - Needs to be rewritten.
+        - Calc
+            - Needs to be rewritten.
+        - Sed
+            - Needs to be rewritten.
+        - Alias
     Add more entries to help
-    Function aliases
     Make msgInterpret return [String] instead of String?
     Replace anonymous functions with named functions for readability?
     Add command line arguments, such as making it not autojoin any servers/channels and instead only join ones specified by a certain parameter.
-    `event' function that appends its output to an MVar at set times
     Clean up Utils.hs
-
-FIXME:
-    Rewrite the calc function
+    Core data needs to be parsed, such as `getservers'.
+    Make reusable functions instead of bloating up the code everywhere you バカ外人！
+    Make Core use the Memory reader Monad?
+    Function and channel blacklist
 
 IMPORTANT:
     Make it more memory efficient
-        Replace Strings with ByteStrings
-        Replace lists with DiffLists
+        Replace Strings with Text
     Add more lewdness
         Random adjecatives
         50% chance of printing a lewd line every hour (or longer if too frequent)
+          This needs a maintained user list or something.
+          Alternatively, pull a random username from the logs, unless the logs
+          are disabled, in which we either print an empty nick or somehow obtain one.
+        Change the lewd file's syntax and add the adjecatives there.
 -}
 
 module Main where
 
+
 import Bot
 import Config
 import IRC
+import Types
 import Utils
 
+import Control.Concurrent
 import Control.Exception
 import Control.Monad
-import Control.Concurrent
+import Control.Monad.Reader
 import Data.Maybe (fromJust, listToMaybe)
 import System.Environment (getArgs)
+import System.IO
 import System.Process
+
 
 printVersion :: IO ()
 printVersion = do
@@ -68,13 +81,20 @@ main = do
     args <- getArgs
     if length args > 0
         then checkArg args
-        else serverConnect
+        else run serverConnect
   where checkArg x  | head x == "--version" = printVersion
-                    | head x == "--test" = mainTest
-                    | otherwise = serverConnect
+                    | head x == "--test" = run mainTest
+                    | otherwise = run serverConnect
+        run f = runReaderT f metaConfig
+        metaConfig = MetaConfig { getMeta = emptyMeta
+                                , getConfig = config
+                                }
 
-mainTest :: IO ()
-mainTest = forever $ getLine >>= msgInterpret meta >>= putStrLn . fromMsg
+mainTest :: Memory ()
+mainTest = forever $ do
+    line <- liftIO getLine
+    let msg = "localhost:Owner!Owner@control PRIVMSG #KawaiiBot :" ++ line
+    parse stdout msg
   where meta = Meta dest nick name host chans server ownnick
         dest = "#KawaiiBot"
         nick = "Owner"

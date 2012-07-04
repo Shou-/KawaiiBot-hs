@@ -20,7 +20,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 module Main where
 
+
 import Utils
+import Types
 import Config
 
 import Control.Exception
@@ -28,6 +30,7 @@ import Control.Monad
 import Control.Concurrent
 import Data.List
 import Data.Maybe (fromJust)
+import Data.String.Utils (split)
 import Data.Time.Clock.POSIX
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
@@ -35,15 +38,25 @@ import Network
 import System.Directory
 import System.IO
 
+-- lazy piece of shit
+---- Pass `config' around to be able to modify it and thus the state of the software.
+debug = verbosityC config
+servers = serversC config
+
 -- TODO:
----- Show disconnections instantly
+---- Show client disconnections instantly
 ---- If an IRC handle is closed, reconnect. Probably need another MVar.
 ------ Work has been started. Make sure handle actions are within `try' functions.
+------ Doesn't reconnect properly.
+-------- After the `irc.server.net has timed out' message is sent, handle is closed
+-------- and KB reconnects but the IRC server does not respond. pls respond.
 ---- Additional internal functions available to the clients:
 ------ `connect irc.freenode.net' to connect to an IRC server. Disconnect too.
 ------ `getservers' to make it output which IRC servers are connected
----- Register with nickserv
------- Need password from destkop.
+---- Lower the CPU usage.
+------ See: clientsListen
+------ CPU usage used to be 0% with `threadDelay 10', see if we can lower it again.
+---- JOINs are ignored if sent too early. Wait for the message with status code `001'.
 
 type CClient = (String, Handle)
 type CServer = (String, Handle)
@@ -59,9 +72,9 @@ write h bs = T.hPutStrLn h bs >> T.putStrLn ('>' `T.cons` bs)
 -- Also return new list based on whether client is connected or not
 clientsWrite :: MVar [CClient] -> T.Text -> IO ()
 clientsWrite mvar line = do
-    when debug $ putStrLn "clientsWrite init..."
+    when (debug > 1) $ putStrLn "clientsWrite init..."
     hs <- takeMVar mvar
-    when debug $ putStrLn "clientsWrite after takeMVar"
+    when (debug > 1) $ putStrLn "clientsWrite after takeMVar"
     mhs <- forM hs $ \(clientHost, clientHandle) -> do
         -- check if handle is still open
         e <- try (T.hPutStrLn clientHandle line >> return clientHandle) :: IO (Either SomeException Handle)
@@ -116,39 +129,64 @@ clientsListen serverMVar timeMVar oldSockHs sockMVar textMVar = do
     times <- readMVar timeMVar
     time <- fmap floor getPOSIXTime
     forM_ times $ \(server, tstamp) -> when (time - tstamp > 240) $ do
-        when debug $ putStrLn (server ++ " has timed out")
-        modifyMVar_ serverMVar $ \servers -> do
-            let f = \(server', handle) -> if server == server'
-                        then hClose handle >> return False
-                        else return True
-            filterM f servers
+        when (debug > 0) $ putStrLn (server ++ " has timed out")
+        removeServer serverMVar server
     ts <- swapMVar textMVar []
     forM_ ts handleMsg
-    threadDelay 10
+    threadDelay (10^4)
     return (serverMVar, timeMVar, oldSockHs', sockMVar, textMVar)
+    -- when a where variable gets this big you break it off
+    -- or at least put blocks of it into bottom level functions
   where handleMsg :: CMessage -> IO ()
         handleMsg (_, clientText) = do
             ircHandles <- readMVar serverMVar
             let (action, message) = split1 ':' clientText
                 send :: Handle -> T.Text -> IO (Either SomeException ())
                 send h x = try $ T.hPutStrLn h x
+            when (debug > 1) . putStrLn $ T.unpack action ++ " == " ++ show ircHandles
             if T.unpack action `elemfst` ircHandles
                 then do
+                    when (debug > 1) $ putStrLn "It's an IRC message."
                     forM_ ircHandles $ \(server, handle') -> do
                         when (T.pack server == action) $ do
                             e <- send handle' message
-                            when debug $ case e of
-                                Right _ -> putStrLn "Successfully sent!"
-                                Left e' -> print e'
+                            case e of
+                                Right _ -> when (debug > 1) $ putStrLn "Successfully sent!"
+                                Left e' -> when (debug > 0) $ print e'
                 else do
+                    when (debug > 1) $ putStrLn "It's a Core message."
                     case T.unpack action of
-                        "getnick" -> return ()
+                        "getnick" -> do
+                            let ownnick = fmap serverNick $ servers `getByServerURL` T.unpack message
+                            case ownnick of
+                                Just nick -> do
+                                    clients <- readMVar sockMVar
+                                    forM_ clients $ \(_, h) -> send h . T.pack $ "getnick:" ++ nick -- ONE WORD: THE FORCED INDENTATION OF THE CODE, THREAD OVER
+                                Nothing -> do
+                                    when (debug > 1) . putStrLn $ "Server `" ++ T.unpack message ++ "' not in `servers'"
                         "getservers" -> do
                             let servs = intercalate " " $ map fst ircHandles
                                 servs' = "getservers:" ++ servs
                             clients <- readMVar sockMVar
                             forM_ clients $ \(_, h) -> send h $ T.pack servs'
-                        "getchannels" -> return ()
+                        "serverquit" -> removeServer serverMVar . istrip $ T.unpack message
+                        "serverjoin" -> do
+                            let msgs = split " " $ T.unpack message
+                            if length msgs >= 3
+                                then do
+                                    let (server : port : nick : xs) = msgs
+                                        port' = if isNum port
+                                                    then read port :: Int
+                                                    else 6667
+                                        server' = defaultServer { serverURL = server
+                                                                , serverPort = port'
+                                                                , serverNick = nick
+                                                                , serverChans = xs
+                                                                , serverNSPass = ""
+                                                                }
+                                    cserver <- ircc server'
+                                    modifyMVar_ serverMVar (return . (cserver:))
+                                else when (debug > 0) $ putStrLn "Not enough arguments"
                         _ -> print $ '<' `T.cons` clientText
         split1 :: Char -> T.Text -> (T.Text, T.Text)
         split1 c t =
@@ -173,7 +211,7 @@ clientsInit serverMVar timeMVar sockMVar textMVar = do
     forM_ chs (forkIO . \h -> clientLoop h sockMVar textMVar)
     clientsLoop serverMVar timeMVar [] sockMVar textMVar
 
-clientLoop :: CClient -- specific handle to read from
+clientLoop :: CClient -- specific client handle to read from
            -> MVar [CClient] -- MVar with client handles
            -> MVar [CMessage] -- MVar to append Text gotten from handle
            -> IO ()
@@ -190,7 +228,7 @@ clientLoop ch@(clientHost, clientHandle) sockMVar textMVar = do
 ircListen :: CServer -> MVar [CServer] -> MVar [CTimestamp] -> MVar [CClient] -> IO ()
 ircListen server@(serverURL, serverHandle) serverMVar timeMVar clientMVar = do
     e <- try (T.hGetLine serverHandle) :: IO (Either SomeException T.Text)
-    when debug $ print e
+    when (debug > 0) $ print e
     case e of
         Right line -> do
             time <- fmap floor getPOSIXTime
@@ -201,7 +239,7 @@ ircListen server@(serverURL, serverHandle) serverMVar timeMVar clientMVar = do
             ircListen (serverURL, serverHandle) serverMVar timeMVar clientMVar
         Left e -> do
             print e
-            when debug $ putStrLn "Closing handle..."
+            when (debug > 1) $ putStrLn "Closing handle..."
             hClose serverHandle
             let server' = servers `getByServerURL` serverURL
             case server' of
@@ -209,29 +247,36 @@ ircListen server@(serverURL, serverHandle) serverMVar timeMVar clientMVar = do
                     newserver <- ircc x
                     modifyMVar_ serverMVar (return . (newserver :) . filter (/= server))
                 -- ABRA KADABRA! ヽ（ ﾟヮﾟ）ﾉ.・ﾟ*｡・+☆┳━┳
-                Nothing -> when debug . putStrLn $ "Server `" ++ serverURL ++ "' not in `servers'"
+                Nothing -> when (debug > 1) . putStrLn $ "Server `" ++ serverURL ++ "' not in `servers'"
   where isPing :: T.Text -> Bool
         isPing x = T.take 4 x == (T.pack "PING")
 
 -- connect to an IRC server and return the handle
 ircc :: Server -> IO CServer
-ircc (Server port server chans nick) = do
+ircc (Server port server chans nick nsPW _ _) = do
     h <- connectTo server . PortNumber $ fromIntegral port
     hSetEncoding h utf8
     hSetBuffering h LineBuffering
     hSetNewlineMode h (NewlineMode CRLF CRLF)
     forM_ (nick' : user' : chans') (write h . T.pack)
+    unless (null nsPW) $ do
+        T.hPutStrLn h . T.pack $ unwords [identify, nsPW]
+        if debug > 1
+            then putStrLn $ unwords [identify, nsPW]
+            else putStrLn $ ">" ++ unwords [identify, take (length nsPW) censor]
     return (server, h)
   where nick' = "NICK " ++ nick
         user' = "USER " ++ nick ++ " 0 * :" ++ nick
         chans' = map ("JOIN " ++) chans
+        identify = "PRIVMSG NickServ :IDENTIFY"
+        censor = cycle "*"
 
 -- create some core data, connect to IRC servers and create the server socket
 main :: IO ()
 main = do
     -- IRC handles
     hs <- forM servers ircc
-    when debug $ print hs
+    when (debug > 1) $ print hs
     -- list of clients connected to the socket
     sockMVar <- newMVar []
     --  MVar with Text input from clients connected to the socket.
@@ -258,4 +303,12 @@ userInput serverMVar = do
         let server = T.takeWhile (/= ':') line
         when (server == T.pack s) $ do
             T.hPutStrLn h (T.tail $ T.dropWhile (/= ':') line)
-            when debug $ putStrLn "Successfully sent!"
+            when (debug > 1) $ putStrLn "Successfully sent!"
+
+-- hClose and remove a server tuple from the IRC server MVar
+removeServer :: MVar [CServer] -> String -> IO ()
+removeServer serverMVar server = do
+    let f = \(server', handle) -> if server == server'
+                then hClose handle >> return False
+                else return True
+    modifyMVar_ serverMVar $ filterM f

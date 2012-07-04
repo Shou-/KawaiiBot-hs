@@ -16,16 +16,18 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -}
 
-{-# LANGUAGE DoAndIfThenElse #-}
+{-# LANGUAGE DoAndIfThenElse
+           , BangPatterns
+           #-}
 
 module Bot where
 
+import Types
 import Utils
-import Config
 
 import Control.Exception
 import Control.Monad hiding (join)
-import qualified Control.Monad as M
+import Control.Monad.Reader hiding (join)
 import Data.List (isInfixOf)
 import Data.Foldable (foldr')
 import Data.Maybe (fromJust, listToMaybe)
@@ -37,35 +39,39 @@ import Text.Regex (subRegex, mkRegex)
 import Text.JSON
 import Text.XML.Light
 
+
 -- Interpret messages and change the data into whatever the functions return
 -- Splits the message on bind operators and uses recursion to execute all as separate functions
 -- The boolean returned decides whether it's a destination message (True) or user message (False).
-msgInterpret :: Meta -> String -> IO Message
-msgInterpret meta str =
+msgInterpret :: String -- String received from the IRC server
+             -> Memory Message
+msgInterpret str =
     if words str /= [] then do
-        let cmd     = takeWhile (/= ':') $ takeWhile (/= ' ') str
-            carg    = concat . fmap (split ":") . take 1 . words $ str
-            smesg   = unwords . takeWhile notAnyOper . tail $ words str
-            opers   = dropWhile notAnyOper $ words str
-            postIO :: String -> IO Message
+        verbosity <- asks (verbosityC . getConfig)
+        let cmd       = takeWhile (/= ':') $ takeWhile (/= ' ') str
+            carg      = concat . fmap (split ":") . take 1 . words $ str
+            smesg     = unwords . takeWhile notAnyOper . tail $ words str
+            opers     = dropWhile notAnyOper $ words str
+            postIO :: String -> Memory Message
             postIO x
                 | x `isFunc` [">"] = -- Public message
                     return $ ChannelMsg smesg
                 | x `isFunc` ["<"] = -- Private message
                     return $ UserMsg smesg
-                | x `isFunc` ["calc"] = -- Calculator
-                    return (calc smesg) >>= return . ChannelMsg
                 | x `isFunc` ["help", "?"] = -- Help about commands
                     return . UserMsg $ help smesg
+                | x `isFunc` ["isup"] = -- return isup.me's title
+                    let url = "http://isup.me/" ++ removePrefixes ["https://", "http://"] smesg
+                    in title url >>= return . ChannelMsg . replace "Huh" "Nyaa" . unwords . take 4 . words
                 | x `isFunc` ["lewd"] = -- Lewd messages
-                    lewd meta >>= return . UserMsg
+                    lewd >>= return . UserMsg
                 | x `isFunc` ["wiki"] = -- Wikipedia summary
                     wiki smesg >>= return . ChannelMsg
                 | x `isFunc` ["sed"] = do -- Regex replace
-                    e <- try (return $ sed smesg) :: IO (Either SomeException String)
+                    e <- liftIO (try (return $ sed smesg) :: IO (Either SomeException String))
                     case e of
                         Right e -> return $ ChannelMsg e
-                        Left e -> print e >> return EmptyMsg
+                        Left e -> liftIO (print e) >> return EmptyMsg
                 | x `isFunc` ["ai"] = -- Recently airing anime
                     airing carg >>= return . ChannelMsg
                 | x `isFunc` ["an"] = -- Recent anime / anime search
@@ -75,21 +81,21 @@ msgInterpret meta str =
                 | x `isFunc` ["ra"] = -- Random/choice
                     random smesg >>= return . ChannelMsg
                 | x `isFunc` ["$"] = -- Variable storing
-                    variable meta carg (bisectAt ' ' smesg) >>= return . ChannelMsg
+                    variable carg (bisectAt ' ' smesg) >>= return . ChannelMsg
                 | x `isFunc` ["tr"] = -- Translate
                     translate carg smesg >>= return . ChannelMsg
                 | x `isFunc` ["we"] = -- Weather
                     weather smesg >>= return . ChannelMsg
                 | x `isFunc` ["^"] = -- Last message / message history
-                    lastMsg meta smesg >>= return . ChannelMsg
+                    lastMsg smesg >>= return . ChannelMsg
                 | isCTCP x = -- CTCP message
                     let xs = tail x
                     in case () of
                       _ | take 7 (tail x) == "VERSION" -> return . UserMsg $ "VERSION "++ botversion
                         | otherwise -> return EmptyMsg
                 | otherwise = -- Fallback
-                    print str >> return EmptyMsg
-            handlebinds :: [String] -> IO Message
+                    liftIO (print str) >> return EmptyMsg
+            handlebinds :: [String] -> Memory Message
             handlebinds [] = postIO cmd
             handlebinds (x:xs)
                 | x == ">>" = do
@@ -97,22 +103,24 @@ msgInterpret meta str =
                     -- check if it's necessary to execute it or not
                     post <- fmap fromMsg $ postIO cmd
                     let act = unwords xs
-                    when debug $ putStrLn $ "Act: " ++ show act ++ "\nPost: " ++ show post
-                    msgI <- msgInterpret meta act
+                    liftIO $ when (verbosity > 1) $ putStrLn $ "Act: " ++ show act ++ "\nPost: " ++ show post
+                    msgI <- msgInterpret act
                     return msgI
                 | x == "->" = do
                     post <- fmap fromMsg $ postIO cmd
                     let func     = unwords . takeWhile notAnyOper $ xs
                         funcTail = unwords . dropWhile notAnyOper $ xs
-                    putStrLn $ "Act: " ++ show func ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show funcTail
-                    msgI <- msgInterpret meta $ func ++ ' ' : post ++ ' ' : funcTail
+                    liftIO . when (verbosity > 1) $ do
+                        putStrLn $ "Act: " ++ show func ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show funcTail
+                    msgI <- msgInterpret $ func ++ ' ' : post ++ ' ' : funcTail
                     return msgI
                 | x == "++" = do
                     post <- fmap fromMsg $ postIO cmd
                     let add     = unwords . takeWhile notAnyOper $ xs
                         addTail = (' ':) . unwords . dropWhile notAnyOper $ xs
-                    putStrLn $ "Act: " ++ show add ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show addTail
-                    msgI <- msgInterpret meta $ add ++ addTail
+                    liftIO . when (verbosity > 1) $ do
+                        putStrLn $ "Act: " ++ show add ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show addTail
+                    msgI <- msgInterpret $ add ++ addTail
                     return (msgType msgI $ post ++ " " ++ fromMsg msgI)
                 | otherwise = postIO cmd
         handlebinds opers
@@ -137,7 +145,7 @@ sed (_:s) =
     else ""
 
 -- Core anime function
-anime' :: String -> [String] -> IO [String]
+anime' :: String -> [String] -> Memory [String]
 anime' str args = do
     let sepFilter :: String -> (String, [String]) -> (String, [String])
         sepFilter x (stracc, filacc) = if negateWord x
@@ -145,60 +153,50 @@ anime' str args = do
             else (' ' : x ++ stracc, filacc)
         (str', filters) = foldr' sepFilter ("", []) $ words str
         url = "https://tokyotosho.info/search.php?type=1&terms=" ++ urlEncode' str'
-    html <- curlGetString' url []
+    html <- liftIO $ curlGetString' url []
     let elem' = fromMaybeElement $ parseXMLDoc html
-        qname = QName "a" Nothing Nothing
-        attrs = [Attr (QName "class" Nothing Nothing) "desc-top"]
+        qname = QName "a" (Just "http://www.w3.org/1999/xhtml") Nothing
+        attrs = [Attr (QName "type" Nothing Nothing) "application/x-bittorrent"]
         elems = findElementsAttrs elem' qname attrs
         animes = map (strip . elemsText) elems
         animes' = filter (\x -> not . or $ map (`isInfixOf` x) filters) animes
         amount = if length args > 1 then (args !! 1) `safeRead` 10 else 10 :: Int
-    putStrLn $ "Filters: %(f); str': %(s)" % [("f", join ", " filters), ("s", str')]
+    liftIO . putStrLn . take 100 . show $ elem'
+    verbosity <- asks (verbosityC . getConfig)
+    liftIO . when (verbosity > 1) $ do
+        putStrLn $ "Filters: %(f); str': %(s)" % [("f", join ", " filters), ("s", str')]
     return $ take amount animes'
   where negateWord :: String -> Bool
         negateWord ('-':_) = True
         negateWord _       = False
 
 -- Styled anime function
-anime :: String -> [String] -> IO String
+anime :: String -> [String] -> Memory String
 anime str args = do
     animes <- anime' str args
     let animes' = map (replace "[" "[\ETX13" . replace "]" "\ETX]") animes
     return $ joinUntil ", " animes' 400
 
 -- Receive, parse and output recent anime airing times.
-airing :: [String] -> IO String
-airing args = do
-    html <- curlGetString' ("http://www.mahou.org/Showtime/Showtime.html") []
+airing' :: [String] -> Memory [String]
+airing' args = do
+    html <- liftIO $ curlGetString' ("http://www.mahou.org/Showtime/Showtime.html") []
     let elem' = fromMaybeElement $ parseXMLDoc html
         qname = QName "tr" Nothing Nothing
         elems = findElements qname elem'
         animes = map elemsText $ tail elems
         amount = if length args > 1 then (args !! 1) `safeRead` 10 else 10 :: Int
         animes' = take amount $ genAnime animes
-    return $ joinUntil ", " animes' 400
+    return animes'
   where genAnime :: [String] -> [String]
         genAnime (animetitle:eta:time:_:xs) = istrip (unwords ["\ETX10" ++ strip animetitle ++ "\ETX", "\ETX13" ++ (strip . drop 16) eta ++ "\ETX", "(" ++ drop 10 time ++ ")"]) : genAnime xs
         genAnime _                   = []
 
--- calculator function
--- This needs to be rewritten to work without spaces, () and not be terrible.
-calc :: String -> String
-calc _ = [] -- temporary, until it gets fixed
-calc [] = []
-calc x' =
-    let xs = words x'
-    in show . parse $ xs
-  where parse :: (Read n, Floating n) => [String] -> n
-        parse (x:y:xs)  | y == "+" = read x + parse xs
-                        | y == "-" = read x - parse xs
-                        | y == "*" = read x * parse xs
-                        | y == "/" = read x / parse xs
-                        | y == "**" = read x ** parse xs
-                        | y == "^" = read x ** parse xs
-                        | otherwise = 0 + parse xs
-        parse (x:[]) = read x
-        parse [] = 0
+-- Front-end for airing', returning a joined list instead
+airing :: [String] -> Memory String
+airing args = do
+    airs <- airing' args
+    return $ joinUntil ", " airs 400
 
 -- Information about the IRC commands the bot provides
 -- Incomplete
@@ -222,13 +220,15 @@ help s
     | otherwise         = "Try `.help' and a function: >, <, ^, $, sed, ai, an, ma, ra, tr, we. Or an operator: bind, pipe, add."
 
 -- Read str as Int, or 0 if not number. Use it as an index for the history list. Fallback to `[]'.
-lastMsg :: Meta -> String -> IO String
-lastMsg meta str = do
+lastMsg :: String -> Memory String
+lastMsg str = do
+    meta <- asks getMeta
+    logsPath <- asks (logsPathC . getConfig)
     let serverurl = getServer meta
         dest = getDestino meta
-    e <- try (do
-        let path = logPath ++ serverurl ++ " " ++ dest
-        fmap (map (\x -> read x :: ([String], String)) . reverse . lines) $ readFile path) :: IO (Either SomeException [([String], String)])
+    e <- liftIO . try $ (do
+        let path = logsPath ++ serverurl ++ " " ++ dest
+        fmap (map (\x -> read x :: ([String], String)) . reverse . lines) $ readFile path) :: Memory (Either SomeException [([String], String)])
     case e of
         Right history -> do
             let len = length history
@@ -236,16 +236,21 @@ lastMsg meta str = do
             if len > n
                 then return . snd $ history !! n
                 else return []
-        Left e -> when debug (print e) >> return []
+        Left e -> do
+            verbosity <- asks (verbosityC . getConfig)
+            liftIO . when (verbosity > 1) $ print e
+            return []
 
 -- Output lewd strings.
-lewd :: Meta -> IO String
-lewd meta = do
-    file <- readFile lewdPath
-    randomadj1 <- randomRIO (0, pred $ length adj1s)
+lewd :: Memory String
+lewd = do
+    meta <- asks getMeta
+    lewdPath <- asks (lewdPathC . getConfig)
+    file <- liftIO $ readFile lewdPath
+    randomadj1 <- liftIO $ randomRIO (0, pred $ length adj1s)
     let obj = [("nick", getUsernick meta), ("adj1", adj1s !! randomadj1)]
         lewds = map (\x -> read x % obj) . lines $ file
-    randomlewd <- randomRIO (0, pred $ length lewds)
+    randomlewd <- liftIO $ randomRIO (0, pred $ length lewds)
     return $ lewds !! randomlewd
   where adj1s = [ "hard"
                 , "wet"
@@ -254,10 +259,10 @@ lewd meta = do
                 , "sticky"]
 
 -- Receive, parse and output recent, or specific, manga titles and related information.
-manga :: String -> [String] -> IO String
+manga :: String -> [String] -> Memory String
 manga str cargs = do
     let url = "https://www.mangaupdates.com/releases.html?act=archive&search=" ++ urlEncode' str
-    html <- curlGetString' url []
+    html <- liftIO $ curlGetString' url []
     let elem' = fromMaybeElement $ parseXMLDoc html
         qname = QName "td" Nothing Nothing
         attrs = [Attr (QName "class" Nothing Nothing) "text pad"]
@@ -284,28 +289,29 @@ manga str cargs = do
     return $ joinUntil ", " mangas 400
 
 -- Pick a random choice or number
-random :: String -> IO String
+random :: String -> Memory String
 random str
-    | isNum str = randomRIO (0, read str :: Integer) >>= return . show
+    | isNum str = liftIO (randomRIO (0, read str :: Integer)) >>= return . show
     | otherwise =
         let choices = split "|" str
             len = length choices
-            choice = randomRIO (0, len - 1) >>= return . (choices !!)
-        in choice
+        in liftIO (randomRIO (0, len - 1)) >>= return . (choices !!)
 
 -- Receive, parse and output the title, or otherwise specified text.
-title :: FilePath -> IO String
+title :: MonadIO m => String -> m String
 title url = do
-    let opts = [CurlFollowLocation True,
-                CurlTimeout 5,
-                CurlMaxFileSize (1024 * 1024 * 5),
-                CurlUserAgent $ unwords [   "Mozilla/5.0",
-                                            "(X11; Linux x86_64;",
-                                            "rv:10.0.2)",
-                                            "Gecko/20100101",
-                                            "Firefox/10.0.2"]]
+    let opts = [ CurlFollowLocation True
+               , CurlTimeout 5
+               , CurlMaxFileSize (1024 * 1024 * 5)
+               , CurlUserAgent $ unwords [ "Mozilla/5.0"
+                                         , "(X11; Linux x86_64;"
+                                         , "rv:10.0.2)"
+                                         , "Gecko/20100101"
+                                         , "Firefox/10.0.2"
+                                         ]
+               ]
 
-    response <- curlGetResponse url opts
+    response <- liftIO $ curlGetResponse url opts
     let headers = respHeaders response
         contentTypeResp = headers `tupleListGet` "Content-Type"
         contentResp = respBody response
@@ -314,11 +320,12 @@ title url = do
             elems = if isNothing maybeElems
                         then Element (QName "" Nothing Nothing) [] [] Nothing
                         else fromJust maybeElems
+            getTitle :: [Element]
             getTitle = filterElements (\element -> if (qName . elName $ element) == "title" then True else False) elems
             special = (if not . isNothing $ specialElem
                             then (++ " ") . elemsText . head' . (fromJust specialElem) $ elems 
                             else []) `cutoff` 200
-            pagetitle = ((special ++ " ") ++) . unwords . map elemsText $ getTitle
+            pagetitle = ((special ++ " ") ++) . unwords . map strContents $ getTitle
         return . istrip . replace "\n" " " $ pagetitle
     else
         return []
@@ -339,25 +346,30 @@ title url = do
 
 -- Translate text to another language
 -- TODO: Replace with Microsoft Translate -- U FRUSTRATED U FRUSTRATED GOOGLE Y U SO MAAAAAAAAAAAAAAAAAAD
---translate :: [String] -> String -> IO String
+translate :: [String] -> String -> Memory String
 translate args str = do
-    let from = show $ if length args > 1 then args !! 1 else ""
-        to = show $ if length args > 2 then args !! 2 else "en"
-        str' = show [urlEncode' str]
-        url = concat [  "http://api.microsofttranslator.com/",
-                        "v2/ajax.svc/TranslateArray",
-                        "?appId=" ++ show msAppId,
-                        "&texts=" ++ str',
-                        "&from=" ++ from,
-                        "&to=" ++ to ]
-    jsonStr <- ((\_ -> return "") :: SomeException -> IO String) `handle` curlGetString' url []
-    putStrLn url >> putStrLn jsonStr
+    msAppId <- asks (msAppIdC . getConfig)
+    verbosity <- asks (verbosityC . getConfig)
+    case msAppId of
+        "" -> return []
+        _ -> do
+            let from = show $ if length args > 1 then args !! 1 else ""
+                to = show $ if length args > 2 then args !! 2 else "en"
+                str' = show [urlEncode' str]
+                url = concat [  "http://api.microsofttranslator.com/",
+                                "v2/ajax.svc/TranslateArray",
+                                "?appId=" ++ show msAppId,
+                                "&texts=" ++ str',
+                                "&from=" ++ from,
+                                "&to=" ++ to ]
+            jsonStr <- liftIO $ ((\_ -> return "") :: SomeException -> IO String) `handle` curlGetString' url []
+            liftIO . when (verbosity > 1) $ putStrLn url >> putStrLn jsonStr
 
-    let jsonStr' = dropWhile (/= '[') jsonStr
-        result = decode jsonStr' :: Result [JSObject JSValue]
-        result' = fmap (fmap snd . (`tupleMaybeGet` "TranslatedText") . fromJSObject . (!! 0)) result
-        text = fromMaybeString $ fmap fromJSString (getOut result')
-    return text
+            let jsonStr' = dropWhile (/= '[') jsonStr
+                result = decode jsonStr' :: Result [JSObject JSValue]
+                result' = fmap (fmap snd . (`tupleMaybeGet` "TranslatedText") . fromJSObject . (!! 0)) result
+                text = fromMaybeString $ fmap fromJSString (getOut result')
+            return text
   where getOut (Ok (Just (JSString a))) = Just a
         getOut _ = Nothing
 
@@ -370,12 +382,15 @@ translate args str = do
 
 -- Variable
 -- YOU'RE WORKING ON THIS YOU だめ人間; FINISH THIS SHIT.
-variable :: Meta -> [String] -> (String, String) -> IO String
-variable meta [_] (varname, []) = do -- Read variable
-    e <- (try $ openFile variablePath ReadMode 
-              >>= \h -> hGetContents h
-              >>= \f -> f `seq` hClose h
-              >> return f) :: IO (Either SomeException String)
+variable :: [String] -> (String, String) -> Memory String
+variable [_] (varname, []) = do -- Read variable
+    meta <- asks getMeta
+    variablePath <- asks (variablePathC . getConfig)
+    e <- (liftIO . try $ do
+        h <- openFile variablePath ReadMode
+        !f <- hGetContents h
+        hClose h
+        return f) :: Memory (Either SomeException String)
     case e of
         Right file -> do
             let nick = getUsernick meta
@@ -396,12 +411,15 @@ variable meta [_] (varname, []) = do -- Read variable
                         then return . fromVariable $ msg
                         else return []
                 else return []
-        Left e -> print e >> return []
-variable meta args (varname, str) = do -- Set variable
-    e <- (try $ openFile variablePath ReadMode 
-               >>= \h -> hGetContents h
-               >>= \f -> f `seq` hClose h
-               >> return f) :: IO (Either SomeException String)
+        Left e -> liftIO (print e) >> return []
+variable args (varname, str) = do -- Set variable
+    meta <- asks getMeta
+    variablePath <- asks (variablePathC . getConfig)
+    e <- (liftIO . try $ do
+        h <- openFile variablePath ReadMode
+        !f <- hGetContents h
+        hClose h
+        return f) :: Memory (Either SomeException String)
     case e of
         Right contents -> do
             let nick = getUsernick meta
@@ -423,29 +441,35 @@ variable meta args (varname, str) = do -- Set variable
                 variables' = (server, dests') `tupleInject` variables :: Variables
 
             if writeableVar msg
-                then putStrLn ("It's writeable: " ++ show variables') >>
-                     writeVariables variables'
+                then do
+                    liftIO . putStrLn $ "It's writeable: " ++ show variables'
+                    writeVariables variables'
                 else if nick == nick'
-                    then putStrLn ("Not writeable, but same user: " ++ show variables') >>
-                         writeVariables variables'
-                    else putStrLn "Cannot overwrite variable." >> return []
-        Left e -> print e >> return []
+                    then do
+                        liftIO . putStrLn $ "Not writeable, but same user: " ++ show variables'
+                        writeVariables variables'
+                    else do
+                        liftIO $ putStrLn "Cannot overwrite variable."
+                        return []
+        Left e -> liftIO (print e) >> return []
   where バカ ('p':'r':'i':_) = Personal
         バカ ('i':'m':'m':_) = Immutable
         バカ ('r':'e':'m':_) = Reminder
         バカ _               = Regular
-        writeVariables :: Variables -> IO String
+        writeVariables :: Variables -> Memory String
         writeVariables variables' = do
-            writeStatus <- (try $ openFile variablePath WriteMode
-                                >>= \h -> hPutStrLn h (show variables')
-                                >> hClose h) :: IO (Either SomeException ())
+            variablePath <- asks (variablePathC . getConfig)
+            writeStatus <- (liftIO . try $ do
+                h <- openFile variablePath WriteMode
+                hPutStrLn h $ show variables'
+                hClose h) :: Memory (Either SomeException ())
             case writeStatus of
                 Right _ -> return []
-                Left e -> print e >> return []
+                Left e -> liftIO (print e) >> return []
 
-weather :: String -> IO String
+weather :: String -> Memory String
 weather str = do
-    xml <- curlGetString' ("http://www.google.com/ig/api?weather=" ++ urlEncode' str) []
+    xml <- liftIO $ curlGetString' ("http://www.google.com/ig/api?weather=" ++ urlEncode' str) []
     let weatherElem = fromMaybeElement $ parseXMLDoc xml
         city = getData . fromMaybeElement $ findElement (QName "city" Nothing Nothing) weatherElem
         condition = map formatCondition . getConditionData $ findElements (QName "current_conditions" Nothing Nothing) weatherElem
@@ -462,14 +486,14 @@ weather str = do
 
 -- Wikipedia
 -- Incomplete -- fix this
-wiki :: String -> IO String
+wiki :: String -> Memory String
 wiki s = do
-    html <- curlGetString' ("https://en.wikipedia.org/w/index.php?search=%s&title=Special%3ASearch" % (replace "+" "%20" . urlEncode') s) []
+    html <- liftIO $ curlGetString' ("https://en.wikipedia.org/w/index.php?search=%s&title=Special%3ASearch" % (replace "+" "%20" . urlEncode') s) []
     let element = fromMaybeElement $ parseXMLDoc html
-        qname = QName "div" (Just "http://www.w3.org/1999/xhtml") (Just "http://www.w3.org/1999/xhtml")
+        qname = QName "div" (Just "http://www.w3.org/1999/xhtml") Nothing
         attrs = [Attr (QName "id" Nothing Nothing) "mw-content-text"]
         element' = fromMaybeElement . listToMaybe $ findElementsAttrs element qname attrs
-        qname' = QName "p" Nothing Nothing
+        qname' = QName "p" (Just "http://www.w3.org/1999/xhtml") Nothing
         element'' = fromMaybeElement $ findElement qname' element'
         text = elemsText element''
-    return $ cutoff text 300
+    return . (`cutoff` 400) $ text

@@ -22,50 +22,97 @@ module IRC where
 
 
 import Bot
-import Config
+import Types
 import Utils
 
 import Control.Concurrent
 import Control.Exception
 import Control.Monad hiding (join)
+import Control.Monad.Reader hiding (join)
+import Data.List
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import Data.Time.Clock.POSIX
 import Data.Maybe (fromJust, listToMaybe)
 import Data.String.Utils (split, join, strip)
 import Network
 import System.IO
+import System.Random (randomRIO)
 
 
 -- Writes a String to a handle and prints the message
 write :: Handle -> Meta -> String -> IO ()
 write h meta str = do
-    let message = getServer meta ++ ":" ++ str
-    e <- try (hPutStrLn h message) :: IO (Either SomeException ())
+    let server = getServer meta
+        message = server ++ ":" ++ str
+    e <- liftIO $ try (hPutStrLn h message) :: IO (Either SomeException ())
     case e of
-        Right _ -> putStrLn $ '>' : message
-        Left e -> print e
+        Right _ -> liftIO . putStrLn $ '>' : message
+        Left e -> liftIO $ print e
 
-listenLoop :: Handle -> Meta -> IO ()
-listenLoop h meta = do
-    s <- hGetLine h
-    parse h meta s
-    listenLoop h meta
+eventInit :: Event -> Memory Event
+eventInit (Event f r ti c s te) = do
+    time <- liftIO $ fmap realToFrac getPOSIXTime
+    time' <- liftIO $ fmap (time +) r
+    return $ Event f r time' c s te
 
-parse :: Handle -> Meta -> String -> IO ()
-parse h meta bs = do
+event :: Handle -> Memory ()
+event h = do
+    events <- asks (eventsC . getConfig)
+    currentTime <- liftIO $ fmap realToFrac getPOSIXTime
+    events' <- forM events $ \event -> do
+        let bool = currentTime >= eventTime event
+        cbool <- liftIO $ chance (eventChance event)
+        case () of
+          _ | bool && cbool -> do
+                let servers :: [Server]
+                    servers = eventServers event
+                    metas :: [Meta]
+                    metas = concat . (`map` servers) $
+                                \(Server _ server channels _ _ _ _) ->
+                                    (`map` channels) $ \channel ->
+                                        Meta channel "Anon" "" "" [] server ""
+                forM_ metas $ \meta -> do
+                    text <- local (injectMeta meta) $ eventFunc event
+                    unless (null text) $ do
+                        liftIO . write h meta $ genPrivmsg meta text
+                eventInit event
+            | not bool -> return event
+            | not cbool -> eventInit event
+    liftIO . threadDelay $ 10^6
+    local (modConfig $ injectEvents events') $ event h
+  where genPrivmsg (Meta dest _ _ _ _ _ _) t = "PRIVMSG " ++ dest ++ " :" ++ t
+        chance :: Double -> IO Bool
+        chance n = do
+            let n' = if n > 1.0 then 1.0 else n
+            i <- randomRIO (0.0, 1.0)
+            return (n >= i)
+
+listenLoop :: Handle -> MVar [String] -> Memory ()
+listenLoop h eventMVar = do
+    s <- liftIO $ hGetLine h
+    parse h s
+    listenLoop h eventMVar
+
+parse :: Handle -- IRC server handle
+      -> String -- message received
+      -> Memory ()
+parse h bs = do
+    meta <- asks getMeta
     let nick = getUsernick meta
         sFull :: [String]
         sFull = ":" `split` bs
         sMsg  = ":" `join` drop 2 sFull
         sArgs = map strip . splits "!@ " . concat $ take 1 $ drop 1 sFull
         meta' = sFull !! 0 `injectServ` meta
-    putStrLn $ show sArgs ++ ' ' : sMsg
+    liftIO . putStrLn $ show sArgs ++ ' ' : sMsg
     if sFull !! 0 `elem` coreArgs
         then return () -- do something you loser
-        else parseMsg h meta' (sArgs, sMsg)
-  where parseMsg :: Handle -> Meta -> ([String], String) -> IO ()
-        parseMsg h meta (args, msg)
+        else local (injectMeta meta') $ parseMsg h (sArgs, sMsg)
+  where parseMsg :: Handle -> ([String], String) -> Memory ()
+        parseMsg h (args, msg)
             | args !! 3 == "PRIVMSG" = do -- Interpret message and respond if anything's returned from `msgInterpret'
+                meta <- asks getMeta
                 let nick = args !! 0
                     name = args !! 1
                     host = args !! 2
@@ -76,29 +123,39 @@ parse h meta bs = do
                     ownnick = getOwnNick meta
 
                     meta' = Meta dest nick name host channels serverurl ownnick
+                local (injectMeta meta') $ do
+                    meta <- asks getMeta
+                    urlFetching <- asks (urlFetchingC . getConfig)
+                    msgLogging <- asks (msgLoggingC . getConfig)
 
-                when urlFetching . void . forkIO $ do -- URL fetching
-                    let urls = filter (\x -> if take 4 x `elem` ["http"] then True else False) $ words msg
-                    forM_ urls $ \url -> title url >>= \title' -> unless (null title') . write h meta' $ "PRIVMSG " ++ dest ++ " :\ETX5Title\ETX: " ++ title'
+                    when urlFetching . void . liftIO . forkIO $ do -- URL fetching
+                        let urls = filter (isPrefixOf "http") $ words msg
+                        forM_ urls $ \url -> do
+                            title' <- title url :: IO String
+                            let message = "PRIVMSG " ++ dest ++ " :\ETX5Title\ETX: " ++ title'
+                            unless (null title') $ write h meta message
+                    post <- msgInterpret msg
+                    let mAct = if isChannelMsg post
+                            then "PRIVMSG " ++ dest
+                            else "PRIVMSG " ++ nick
+                        msg' = fromMsg post
 
-                post <- msgInterpret meta' msg
-                let mAct = if isChannelMsg post
-                        then "PRIVMSG " ++ dest
-                        else "PRIVMSG " ++ nick
-                    msg' = fromMsg post
+                    unless (null msg') . liftIO . write h meta $ mAct ++ " :" ++ msg'
 
-                unless (null msg') . write h meta' $ mAct ++ " :" ++ msg'
+                    logsPath <- asks (logsPathC . getConfig)
+                    verbosity <- asks (verbosityC . getConfig)
+                    liftIO . when msgLogging $ do -- logging
+                        e <- try (do
+                            let path = logsPath ++ serverurl ++ " " ++ dest
+                            appendFile path $ show (args, msg) ++ "\n") :: IO (Either SomeException ())
+                        case e of
+                            Right _ -> return ()
+                            Left e -> do
+                                when (verbosity > 0) $ print e
 
-                when msgLogging $ do -- logging
-                    e <- try (do
-                        let path = logPath ++ serverurl ++ " " ++ dest
-                        appendFile path $ show (args, msg) ++ "\n") :: IO (Either SomeException ())
-                    case e of
-                        Right _ -> return ()
-                        Left e -> when debug $ print e
-
-                return ()
+                    return ()
             | args !! 3 == "INVITE" = do -- Join a channel on invite
+                meta <- asks getMeta
                 let nick = args !! 0
                     name = args !! 1
                     host = args !! 2
@@ -109,17 +166,16 @@ parse h meta bs = do
                     ownnick = getOwnNick meta
 
                     meta' = Meta dest nick name host channels serverurl ownnick
-
-                -- print reminder message if any
 
                 -- check this channel against a list of banned ones or something
-                write h meta' $ "JOIN " ++ msg
+                --liftIO . write h meta' $ "JOIN " ++ msg
+                liftIO . write h meta' $ "PRIVMSG " ++ nick ++ " :Invites are currently disabled due to KawaaiiBot's incompleteness."
                 return ()
-            | args !! 3 == "KICK" = do -- Single nicklist update
+            | args !! 3 == "KICK" = do 
                 let dest = args !! 4
 
                 return ()
-            | args !! 3 == "PART" = do -- Single nicklist update
+            | args !! 3 == "PART" = do
                 let nick = args !! 0
                     dest = args !! 4
 
@@ -128,19 +184,17 @@ parse h meta bs = do
                 let nick = args !! 0
                     dest = msg
 
-                -- get :reminder variable
+                -- get :reminder variable for person joining
                 return ()
-            | args !! 3 == "QUIT" = do -- Full nicklist update
+            | args !! 3 == "QUIT" = do 
                 let nick = args !! 0
-                    f = foldr (\(x, nick') acc -> if nick' == nick then acc else (x, nick') : acc) []
 
                 return ()
-            | args !! 3 == "NICK" = do -- Full nicklist update
+            | args !! 3 == "NICK" = do 
                 let nick = args !! 0
-                    f = foldr (\(x, nick') acc -> if nick' == nick then (x, msg) : acc else (x, nick') : acc) []
 
                 return ()
-            | args !! 3 == "MODE" = do -- Full nicklist update; Figure out a way to handle this. Make new `data' for modes?
+            | args !! 3 == "MODE" = do 
                 let nick = args !! 0
                     dest = args !! 4
                     mode = args !! 5
@@ -154,15 +208,20 @@ parse h meta bs = do
                 return ()
             | otherwise = do -- Fallback
                 return ()
-        coreArgs = ["getservers", "getnick", "getchannels"]
+        coreArgs = ["getservers", "getnick", "serverjoin", "serverquit"]
 
 -- Connects to an IRC server
-serverConnect :: IO ()
+serverConnect :: Memory ()
 serverConnect = do
-    h <- connectTo "localhost" (PortNumber $ fromIntegral 3737)
-    hSetEncoding h utf8
-    hSetBuffering h LineBuffering
-    hSetNewlineMode h (NewlineMode CRLF CRLF)
-    forkIO . forever $ getLine >>= hPutStrLn h
-    let meta = Meta [] [] [] [] [] [] []
-    listenLoop h meta
+    h <- liftIO $ do
+        h <- connectTo "localhost" (PortNumber $ fromIntegral 3737)
+        hSetEncoding h utf8
+        hSetBuffering h LineBuffering
+        hSetNewlineMode h (NewlineMode CRLF CRLF)
+        forkIO . forever $ getLine >>= \s -> unless (null s) $ hPutStrLn h s
+        return h
+    eventMVar <- liftIO $ newMVar []
+    events <- asks (eventsC . getConfig)
+    events' <- mapM eventInit events
+    local (modConfig $ injectEvents events') (forkMe $ event h)
+    listenLoop h eventMVar

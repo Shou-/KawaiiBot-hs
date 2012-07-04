@@ -12,7 +12,7 @@ To run KawaiiBot, execute `kawaiibot-core` and `kawaiibot-client`.
 ## Functions
 * `.help`
 This function sends the general help string to the user who typed this.
-It takes one argument, the name of a function.
+It takes one optional argument, the name of a function.
 
 * `.>`
 Prints a message to the channel, or user if it is a private message.
@@ -28,7 +28,15 @@ It takes two arguments, the regex matching and replacing string (ex: `/banana/ap
 
 * `.ai`
 Prints currently airing anime.
-It takes one colon argument, an integer. (ex: `.ai:10`, will print 10 of the fetched airing anime)
+It takes one optional colon argument, an integer. (ex: `.ai:10`, will print 10 of the fetched airing anime)
+
+* `.an`
+Prints recently released anime.
+It takes two optional arguments. The number of results to print and the anime to search for. (ex: `.an:5 yuruyuri -HorribleSubs`)
+
+* `.ma`
+Prints recent manga releases.
+It takes two optional arguments. The number of results to print and the manga to search for. (ex `.ma:2 banana no nana`)
 
 * `.ra`
 Prints a random number or string.
@@ -36,11 +44,15 @@ Takes one integer as an argument, or several strings separated by `|` (pipe).
 
 * `.we`
 Prints weather information for the specified location.
-Takes one string argument.
+Takes one string argument, either a location or a postal code.
 
 * `.lewd`
 Prints a random string from the file as defined in `Config.hs`.
 Takes zero arguments.
+
+* `.wiki`
+Prints the top paragraph of a Wikipedia article.
+Takes one argument, the article title.
 
 ## Operators
 * `>>`

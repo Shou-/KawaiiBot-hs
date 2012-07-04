@@ -19,19 +19,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 {-
 TODO:
 -- Clean up this file, sort functions and such by category.
+---- Move types, classes, instances, etc to its own module, `Types.hs'.
 -}
 
-
-{-# LANGUAGE DoAndIfThenElse,
-    MultiParamTypeClasses,
-    TypeSynonymInstances,
-    FlexibleInstances #-}
+{-# LANGUAGE DoAndIfThenElse
+           #-}
 
 module Utils where
 
 
+import Types
+
 import Codec.Binary.UTF8.String (encodeString, decodeString)
+import Control.Concurrent
 import Control.Exception
+import Control.Monad.Reader
 import Data.Maybe (fromJust, listToMaybe)
 import Data.String.Utils (split, replace)
 import qualified Data.Text as T
@@ -39,54 +41,6 @@ import Network.CGI (urlEncode, urlDecode)
 import Network.Curl
 import Text.XML.Light
 
-
-class PyFormat s r where
-    (%) :: s -> r -> s
-
-instance PyFormat String [(String, String)] where
-    (%) x y = foldr (\(s1, s2) x' -> replace ("%(" ++ s1 ++ ")") s2 x') x y
-
-instance PyFormat String (String, String) where
-    (%) x (s1, s2) = replace ("%(" ++ s1 ++ ")") s2 x
-
-instance PyFormat String String where
-    (%) x y = replace "%s" y x
-
-instance PyFormat T.Text [(String, String)] where
-    (%) x y = let text = T.unpack x
-              in T.pack $ text % y
-
-type Variables = [(String, [(String, [(String, String, Variable String)])])]
-
-data Message = ChannelMsg String
-             | UserMsg String
-             | EmptyMsg
-             deriving (Eq, Show)
-
-data Variable a = Regular a
-                | Personal a
-                | Immutable a
-                | Reminder a
-                | EmptyVar
-                deriving (Show, Read, Eq)
-
-data Server = Server { serverPort :: Int
-                     , serverURL :: String
-                     , serverChans :: [String]
-                     , serverNick :: String
-                     } deriving (Show, Read)
-
-data Meta = Meta {
-    getDestino :: String,
-    getUsernick :: String,
-    getUsername :: String,
-    getHostname :: String,
-    getChannels :: [String],
-    getServer :: String,
-    getOwnNick :: String
-    } deriving (Show, Read, Eq)
-
-type HistMsg = (String, String, String, String)
 
 botversion = "KawaiiBot 0.1.1"
 
@@ -107,7 +61,7 @@ getByServerURL xs s = foldr f Nothing xs
   where f = (\x acc -> if serverURL x == s then Just x else acc)
 
 cutoff :: String -> Int -> String
-cutoff s n = if length s > n then (take n s) ++ "..." else s
+cutoff s n = if length s > n then (take n s) ++ "…" else s
 
 joinUntil :: String -> [String] -> Int -> String
 joinUntil str strs n =
@@ -155,6 +109,22 @@ istrip (x:xs) | x /= ' '  = x : istrip' xs
         istrip'' []         = []
 istrip _ = []
 
+removePrefixes :: [String] -> String -> String
+removePrefixes [] str = str
+removePrefixes (x:xs) str =
+    let f n [] = (n == length x, [])
+        f n (x':xs') =
+            let rest = drop n x
+            in if length rest > 0
+                then if x' == head (drop n x)
+                    then f (n+1) xs'
+                    else (n == length x, xs')
+                else (n == length x, x':xs')
+        (b, str') = f 0 str
+    in if b
+        then str'
+        else removePrefixes xs str
+
 unlines' :: [String] -> String
 unlines' (x:[]) = x
 unlines' xs     = unlines xs
@@ -169,19 +139,27 @@ curlGetString' :: FilePath -> [CurlOption] -> IO String
 curlGetString' url opt =
     let errorfunc :: SomeException -> IO String
         errorfunc e = print e >> return ""
-        opt' = opt ++ [ CurlFollowLocation True,
-                        CurlTimeout 5,
-                        CurlMaxFileSize (1024 * 1024 * 5),
-                        CurlUserAgent (unwords [ "Mozilla/5.0",
-                                                "(X11; Linux x86_64;",
-                                                "rv:10.0.2)",
-                                                "Gecko/20100101",
-                                                "Firefox/10.0.2"])]
+        opt' = opt ++ [ CurlFollowLocation True
+                      , CurlTimeout 5
+                      , CurlMaxFileSize (1024 * 1024 * 5)
+                      , CurlUserAgent $ unwords [ "Mozilla/5.0"
+                                                , "(X11; Linux x86_64;"
+                                                , "rv:10.0.2)"
+                                                , "Gecko/20100101"
+                                                , "Firefox/10.0.2"
+                                                ]
+                      ]
         curlFetch = do
             (status, response) <- curlGetString url opt'
             print status
             return response
     in handle errorfunc curlFetch
+
+-- fork for the Memory monad.
+forkMe :: (MonadReader r m, MonadIO m) => ReaderT r IO () -> m ThreadId
+forkMe m = do
+    r <- ask
+    liftIO . forkIO $ runReaderT m r
 
 findElementsAttrs :: Element -> QName -> [Attr] -> [Element]
 findElementsAttrs element name attrs = filterElements match element
@@ -195,11 +173,40 @@ findElementsAttrs element name attrs = filterElements match element
         compare_ :: Eq a => [a] -> [a] -> Bool
         compare_ x y = and $ map fst $ foldr (\x'' acc -> if x'' `elem` y then (True, x'') : acc else (False, x'') : acc) [] x
 
+-- TODO:
+---- Convert Elem to Text and concat it into one single Elem with loads of Text
+---- then run strContent' over it.
 elemsText :: Element -> String
-elemsText elem' =
-    let elems' = onlyElems . elContent $ elem'
-        strs = if null elems' then [] else ' ' : (unwords . map elemsText $ elems')
-    in strContent elem' ++ strs
+elemsText elem = 
+    let name = elName elem
+        attrs = elAttribs elem
+        content = elemsText' . elContent $ elem
+        line = elLine elem
+        elem' = Element name attrs [content] line
+    in strContents elem'
+  where elemsText' :: [Text.XML.Light.Content] -> Text.XML.Light.Content
+        elemsText' cs =
+            let f x acc = case () of
+                  _ | isElem x -> (fold . elContent . fromElem) x ++ acc
+                    | isText x ->textToString x : acc
+                    | otherwise -> acc
+                fold x = foldr f [] x
+            in genText . concat . fold $ cs
+        isText (Text _) = True
+        isText _ = False
+        isElem (Elem _) = True
+        isElem _ = False
+        fromElem (Elem x) = x
+        textToString (Text x) = cdData x
+        genText x = Text $ CData { cdVerbatim = CDataText
+                                 , cdData = x
+                                 , cdLine = Nothing
+                                 }
+
+strContents (Element _ _ content _) =
+    unwords $ map (cdData . fromText) . filter isText $ content
+  where isText (Text _) = True
+        isText _ = False
 
 elemText :: [Text.XML.Light.Content] -> String
 elemText content' = foldr (\x acc -> if isElemText x then acc ++ (cdData . fromText $ x) else acc) "" content'
@@ -252,6 +259,14 @@ modUserlists f (Server serverurl port nick nspw chans metas) = let metas' = map 
 
 injectServ :: String -> Meta -> Meta
 injectServ str (Meta d n u h c _ o) = Meta d n u h c str o
+
+injectEvents events (Config s1 _ f1 f2 f3 s2 b1 b2 i) =
+    Config s1 events f1 f2 f3 s2 b1 b2 i
+
+injectMeta :: Meta -> MetaConfig -> MetaConfig
+injectMeta meta (MetaConfig _ config) = MetaConfig meta config
+
+modConfig f (MetaConfig meta config) = MetaConfig meta $ f config
 
 tupleVarGet :: [(String, String, Variable String)] -> String -> (String, String, Variable String)
 tupleVarGet l s = foldr (\(x, y, z) acc -> if x == s then (x, y, z) else acc) ("", "", EmptyVar) l

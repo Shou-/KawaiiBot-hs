@@ -10,6 +10,8 @@ Cabal-Version:      >= 1.2
 Build-Type:         Simple
 
 Executable kawaiibot-client
+    GHC-Options:
+        -threaded
     Build-Depends:
         base,
         curl,
@@ -17,6 +19,7 @@ Executable kawaiibot-client
         HTTP,
         json,
         MissingH,
+        mtl,
         network,
         process,
         random,
@@ -28,6 +31,8 @@ Executable kawaiibot-client
         Main.hs
 
 Executable kawaiibot-core
+    GHC-Options:
+        -threaded
     Build-Depends:
         text,
         time,
