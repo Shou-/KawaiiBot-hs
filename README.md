@@ -11,7 +11,7 @@ To run KawaiiBot, execute `kawaiibot-core` and `kawaiibot-client`.
 
 ## Functions
 
-All functions need to be prefixed with `.' or `!'.
+All functions need to be prefixed with '.' or '!'.
 
 * `.help`
 This function sends the general help string to the user who typed this.<br>
