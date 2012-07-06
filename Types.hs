@@ -49,6 +49,7 @@ data Message = ChannelMsg String
 
 data Allowed a = Blacklist { getBlacklist :: a }
                | Whitelist { getWhitelist :: a }
+               deriving (Show)
 
 data Variable a = Regular a
                 | Personal a
@@ -63,7 +64,7 @@ data Config = Config { serversC :: [Server]
                      , logsPathC :: FilePath
                      , variablePathC :: FilePath
                      , msAppIdC :: String
-                     , urlFetchingC :: Bool
+                     , titleFetchingC :: Bool
                      , msgLoggingC :: Bool
                      , verbosityC :: Int
                      }
@@ -74,7 +75,7 @@ defaultConfig = Config { serversC = []
                        , logsPathC = ""
                        , variablePathC = ""
                        , msAppIdC = ""
-                       , urlFetchingC = False
+                       , titleFetchingC = False
                        , msgLoggingC = False
                        , verbosityC = 1
                        }
@@ -85,8 +86,8 @@ data Server = Server { serverPort :: Int
                      , serverNick :: String
                      , serverNSPass :: String
                      , allowedChannels :: Allowed [String]
-                     , allowedFuncs :: [(String, Allowed [String])]
-                     }
+                     , allowedFuncs :: [(String, [Allowed String])]
+                     } deriving (Show)
 
 defaultServer = Server { serverPort = 6667
                        , serverURL = ""
@@ -120,7 +121,7 @@ data Meta = Meta { getDestino :: String
                  , getChannels :: [String]
                  , getServer :: String
                  , getOwnNick :: String
-                 } deriving (Show, Read, Eq)
+                 } deriving (Show, Eq)
 
 emptyMeta = Meta [] [] [] [] [] [] []
 

@@ -41,11 +41,12 @@ import System.Random (randomRIO)
 
 
 -- Writes a String to a handle and prints the message
-write :: Handle -> Meta -> String -> IO ()
-write h meta str = do
+write :: Handle -> String -> Memory ()
+write h str = do
+    meta <- asks getMeta
     let server = getServer meta
         message = server ++ ":" ++ str
-    e <- liftIO $ try (hPutStrLn h message) :: IO (Either SomeException ())
+    e <- liftIO $ try (hPutStrLn h message) :: Memory (Either SomeException ())
     case e of
         Right _ -> liftIO . putStrLn $ '>' : message
         Left e -> liftIO $ print e
@@ -75,7 +76,8 @@ event h = do
                 forM_ metas $ \meta -> do
                     text <- local (injectMeta meta) $ eventFunc event
                     unless (null text) $ do
-                        liftIO . write h meta $ genPrivmsg meta text
+                        local (injectMeta meta) $ do
+                            write h $ genPrivmsg meta text
                 eventInit event
             | not bool -> return event
             | not cbool -> eventInit event
@@ -125,22 +127,22 @@ parse h bs = do
                     meta' = Meta dest nick name host channels serverurl ownnick
                 local (injectMeta meta') $ do
                     meta <- asks getMeta
-                    urlFetching <- asks (urlFetchingC . getConfig)
+                    titleFetching <- asks (titleFetchingC . getConfig)
                     msgLogging <- asks (msgLoggingC . getConfig)
 
-                    when urlFetching . void . liftIO . forkIO $ do -- URL fetching
+                    when titleFetching . void . forkMe $ do -- URL fetching
                         let urls = filter (isPrefixOf "http") $ words msg
                         forM_ urls $ \url -> do
-                            title' <- title url :: IO String
+                            title' <- title url
                             let message = "PRIVMSG " ++ dest ++ " :\ETX5Title\ETX: " ++ title'
-                            unless (null title') $ write h meta message
+                            unless (null title') $ write h message
                     post <- msgInterpret msg
                     let mAct = if isChannelMsg post
                             then "PRIVMSG " ++ dest
                             else "PRIVMSG " ++ nick
                         msg' = fromMsg post
 
-                    unless (null msg') . liftIO . write h meta $ mAct ++ " :" ++ msg'
+                    unless (null msg') . write h $ mAct ++ " :" ++ msg'
 
                     logsPath <- asks (logsPathC . getConfig)
                     verbosity <- asks (verbosityC . getConfig)
@@ -168,8 +170,19 @@ parse h bs = do
                     meta' = Meta dest nick name host channels serverurl ownnick
 
                 -- check this channel against a list of banned ones or something
-                --liftIO . write h meta' $ "JOIN " ++ msg
-                liftIO . write h meta' $ "PRIVMSG " ++ nick ++ " :Invites are currently disabled due to KawaaiiBot's incompleteness."
+                allowedChans <- asks (fmap allowedChannels . (`findServer` serverurl) . serversC . getConfig)
+                case allowedChans of
+                    Just (Blacklist xs) -> do
+                        if msg `elem` xs then do
+                            write h $ "JOIN " ++ msg
+                        else do
+                            write h $ "PRIVMSG " ++ dest ++ " :Your channel is blacklisted."
+                    Just (Whitelist xs) -> do
+                        if msg `elem` xs then do
+                            write h $ "JOIN " ++ msg
+                        else do
+                            write h $ "PRIVMSG " ++ dest ++ " :Your channel is not whitelisted."
+                    Nothing -> return ()
                 return ()
             | args !! 3 == "KICK" = do 
                 let dest = args !! 4

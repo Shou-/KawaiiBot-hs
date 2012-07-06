@@ -217,7 +217,8 @@ help s
     | s == "<"          = "Prints a string to the user. Ex: .< hey"
     | s == "^"          = "Gets a message from the history. Ex: .^ 3"
     | s == "$"          = "Gets a stored variable. Ex: .$:immutable myVariableName My variable message."
-    | otherwise         = "Try `.help' and a function: >, <, ^, $, sed, ai, an, ma, ra, tr, we. Or an operator: bind, pipe, add."
+    | s == "github"     = "https://github.com/Shou-/KawaiiBot-hs"
+    | otherwise         = "Try `.help' and a value. Functions: >, <, ^, $, sed, ai, an, ma, ra, tr, we. Operators: bind, pipe, add. Extra: github"
 
 -- Read str as Int, or 0 if not number. Use it as an index for the history list. Fallback to `[]'.
 lastMsg :: String -> Memory String
@@ -325,7 +326,7 @@ title url = do
             special = (if not . isNothing $ specialElem
                             then (++ " ") . elemsText . head' . (fromJust specialElem) $ elems 
                             else []) `cutoff` 200
-            pagetitle = ((special ++ " ") ++) . unwords . map strContents $ getTitle
+            pagetitle = ((special ++ " ") ++) . unwords . map elemsText $ getTitle
         return . istrip . replace "\n" " " $ pagetitle
     else
         return []

@@ -233,9 +233,18 @@ ircListen server@(serverURL, serverHandle) serverMVar timeMVar clientMVar = do
         Right line -> do
             time <- fmap floor getPOSIXTime
             modifyMVar_ timeMVar $ return . tupleInject (serverURL, time)
-            if isPing line
-                then T.hPutStrLn serverHandle $ (T.pack "PONG") `T.append` T.drop 4 line
-                else clientsWrite clientMVar $ T.pack serverURL `T.append` line
+            case () of
+              _ | isPing line -> do
+                    T.hPutStrLn serverHandle $ (T.pack "PONG") `T.append` T.drop 4 line
+                | isWelcome line -> do
+                    when (debug > 1) $ do
+                        putStrLn "Server welcome message, joining channels."
+                    let server' = findServer servers serverURL
+                    when (isJust server') $ do
+                        joinChannels serverHandle $ fromJust server'
+                        nickservRegister serverHandle $ fromJust server'
+                | otherwise -> do
+                    clientsWrite clientMVar $ T.pack serverURL `T.append` line
             ircListen (serverURL, serverHandle) serverMVar timeMVar clientMVar
         Left e -> do
             print e
@@ -246,10 +255,19 @@ ircListen server@(serverURL, serverHandle) serverMVar timeMVar clientMVar = do
                 Just x -> do
                     newserver <- ircc x
                     modifyMVar_ serverMVar (return . (newserver :) . filter (/= server))
+                    ircListen newserver serverMVar timeMVar clientMVar
                 -- ABRA KADABRA! ヽ（ ﾟヮﾟ）ﾉ.・ﾟ*｡・+☆┳━┳
                 Nothing -> when (debug > 1) . putStrLn $ "Server `" ++ serverURL ++ "' not in `servers'"
   where isPing :: T.Text -> Bool
         isPing x = T.take 4 x == (T.pack "PING")
+        isWelcome :: T.Text -> Bool
+        isWelcome x =
+            let xs = T.words x
+            in if length xs >= 2
+                then xs !! 1 == T.pack "001"
+                else False
+        isJust (Just _) = True
+        isJust _ = False
 
 -- connect to an IRC server and return the handle
 ircc :: Server -> IO CServer
@@ -258,17 +276,23 @@ ircc (Server port server chans nick nsPW _ _) = do
     hSetEncoding h utf8
     hSetBuffering h LineBuffering
     hSetNewlineMode h (NewlineMode CRLF CRLF)
-    forM_ (nick' : user' : chans') (write h . T.pack)
-    unless (null nsPW) $ do
-        T.hPutStrLn h . T.pack $ unwords [identify, nsPW]
-        if debug > 1
-            then putStrLn $ unwords [identify, nsPW]
-            else putStrLn $ ">" ++ unwords [identify, take (length nsPW) censor]
+    forM_ [nick', user'] (write h . T.pack)
     return (server, h)
   where nick' = "NICK " ++ nick
         user' = "USER " ++ nick ++ " 0 * :" ++ nick
-        chans' = map ("JOIN " ++) chans
-        identify = "PRIVMSG NickServ :IDENTIFY"
+
+joinChannels :: Handle -> Server -> IO ()
+joinChannels h (Server _ _ chans _ _ _ _) = do
+    let chans' = map ("JOIN " ++) chans
+    forM_ chans' $ write h . T.pack
+
+nickservRegister :: Handle -> Server -> IO ()
+nickservRegister h (Server _ _ _ _ nsPW _ _) = do
+    unless (null nsPW) . write h . T.pack $ unwords [identify, nsPW]
+    if debug > 1
+        then putStrLn $ unwords [identify, nsPW]
+        else putStrLn $ ">" ++ unwords [identify, take (length nsPW) censor]
+  where identify = "PRIVMSG NickServ :IDENTIFY"
         censor = cycle "*"
 
 -- create some core data, connect to IRC servers and create the server socket

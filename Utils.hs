@@ -177,18 +177,20 @@ findElementsAttrs element name attrs = filterElements match element
 ---- Convert Elem to Text and concat it into one single Elem with loads of Text
 ---- then run strContent' over it.
 elemsText :: Element -> String
-elemsText elem = 
-    let name = elName elem
-        attrs = elAttribs elem
-        content = elemsText' . elContent $ elem
-        line = elLine elem
+elemsText e =
+    let name = elName e
+        attrs = elAttribs e
+        content = elemsText' . elContent $ e
+        line = elLine e
         elem' = Element name attrs [content] line
     in strContents elem'
   where elemsText' :: [Text.XML.Light.Content] -> Text.XML.Light.Content
         elemsText' cs =
             let f x acc = case () of
-                  _ | isElem x -> (fold . elContent . fromElem) x ++ acc
-                    | isText x ->textToString x : acc
+                  _ | isElem x -> if isBR $ fromElem x
+                        then " " : (fold . elContent . fromElem) x ++ acc
+                        else (fold . elContent . fromElem) x ++ acc
+                    | isText x -> textToString x : acc
                     | otherwise -> acc
                 fold x = foldr f [] x
             in genText . concat . fold $ cs
@@ -196,6 +198,9 @@ elemsText elem =
         isText _ = False
         isElem (Elem _) = True
         isElem _ = False
+        isBR (Element (QName n _ _) _ _ _) =
+            n `elem` ["br", "bR", "Br", "BR"]
+        isBR _ = False
         fromElem (Elem x) = x
         textToString (Text x) = cdData x
         genText x = Text $ CData { cdVerbatim = CDataText
@@ -259,6 +264,12 @@ modUserlists f (Server serverurl port nick nspw chans metas) = let metas' = map 
 
 injectServ :: String -> Meta -> Meta
 injectServ str (Meta d n u h c _ o) = Meta d n u h c str o
+
+findServer :: [Server] -> String -> Maybe Server
+findServer [] _ = Nothing
+findServer (server@(Server _ url _ _ _ _ _):xs) s = if s == url
+    then Just server
+    else findServer xs s
 
 injectEvents events (Config s1 _ f1 f2 f3 s2 b1 b2 i) =
     Config s1 events f1 f2 f3 s2 b1 b2 i
