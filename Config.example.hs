@@ -57,7 +57,7 @@ none Haskellers.
 We can write it in another way
     eventFunc = do
         we <- weather "Oslo, Norway"
-        sed "/Today/Right now/ " ++ we
+        sed ("/Today/Right now/ " ++ we)
 -}
 
                             -- event functions
@@ -92,7 +92,8 @@ freenode = Server { serverURL = "irc.freenode.net"
                   , serverNick = "QuteBot"
                                     -- NickServ password
                   , serverNSPass = ""
-                                    -- The only channels KawaiiBot should join.
+                                    -- The only channels KawaiiBot should join
+                                    -- if invited.
                   , allowedChannels = Whitelist ["#kawaiibot"]
                   , allowedFuncs = []
                   }
@@ -101,10 +102,25 @@ rizon = Server { serverURL = "irc.rizon.net"
                   , serverPort = 6667
                   , serverNick = "QuteBot"
                   , serverNSPass = ""
-                                    -- Channels that KawaiiBot shouldn't join.
+                                    -- Channels that KawaiiBot shouldn't join
+                                    -- if invited.
                   , allowedChannels = Blacklist ["#malicious", "#channels"]
                   , allowedFuncs = []
                   }
+                    -- channel where the allowed functions apply to
+  where funcs = [ ("#KawaiiBot",
+                            -- See `Types.hs' if you want to see what the names
+                            -- of the variables are and the default values.
+                            -- Search for `defaultFuncs'.
+
+                                        -- Allow title fetching for URLs
+                        defaultFuncs { allowTitle = True
+                                        -- Disallow printing of lewd messages
+                                     , allowLewd = False
+                                     }
+                  )
+                , ("#someotherchannel", defaultFuncs)
+                ]
 
 config =            -- file where variables are stored by the `.$' function.
     defaultConfig { variablePathC   = storagePath ++ "variables"
@@ -122,9 +138,6 @@ config =            -- file where variables are stored by the `.$' function.
 
                     -- servers
                   , serversC        = [freenode, rizon]
-
-                    -- whether to print URL titles or not
-                  , titleFetchingC  = True
 
                     -- whether to log messages or not
                   , msgLoggingC     = True

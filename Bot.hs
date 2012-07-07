@@ -55,39 +55,53 @@ msgInterpret str =
             postIO :: String -> Memory Message
             postIO x
                 | x `isFunc` [">"] = -- Public message
-                    return $ ChannelMsg smesg
+                    allowFuncThen allowPrint $ do
+                        return $ ChannelMsg smesg
                 | x `isFunc` ["<"] = -- Private message
-                    return $ UserMsg smesg
+                    allowFuncThen allowPrint $ do
+                        return $ UserMsg smesg
                 | x `isFunc` ["help", "?"] = -- Help about commands
                     return . UserMsg $ help smesg
                 | x `isFunc` ["isup"] = -- return isup.me's title
-                    let url = "http://isup.me/" ++ removePrefixes ["https://", "http://"] smesg
-                    in title url >>= return . ChannelMsg . replace "Huh" "Nyaa" . unwords . take 4 . words
+                    allowFuncThen allowIsup $
+                        let url = "http://isup.me/" ++ removePrefixes ["https://", "http://"] smesg
+                        in title url >>= return . ChannelMsg . replace "Huh" "Nyaa" . unwords . take 4 . words
                 | x `isFunc` ["lewd"] = -- Lewd messages
-                    lewd >>= return . UserMsg
+                    allowFuncThen allowLewd $ do
+                        lewd >>= return . UserMsg
                 | x `isFunc` ["wiki"] = -- Wikipedia summary
-                    wiki smesg >>= return . ChannelMsg
+                    allowFuncThen allowWiki $ do
+                        wiki smesg >>= return . ChannelMsg
                 | x `isFunc` ["sed"] = do -- Regex replace
-                    e <- liftIO (try (return $ sed smesg) :: IO (Either SomeException String))
-                    case e of
-                        Right e -> return $ ChannelMsg e
-                        Left e -> liftIO (print e) >> return EmptyMsg
+                    allowFuncThen allowSed $ do
+                        e <- liftIO (try (return $ sed smesg) :: IO (Either SomeException String))
+                        case e of
+                            Right e -> return $ ChannelMsg e
+                            Left e -> liftIO (print e) >> return EmptyMsg
                 | x `isFunc` ["ai"] = -- Recently airing anime
-                    airing carg >>= return . ChannelMsg
+                    allowFuncThen allowAiring $ do
+                        airing carg >>= return . ChannelMsg
                 | x `isFunc` ["an"] = -- Recent anime / anime search
-                    anime smesg carg >>= return . ChannelMsg
+                    allowFuncThen allowAnime $ do
+                        anime smesg carg >>= return . ChannelMsg
                 | x `isFunc` ["ma"] = -- Recent manga / manga search
-                    manga smesg carg >>= return . ChannelMsg
+                    allowFuncThen allowManga $ do
+                        manga smesg carg >>= return . ChannelMsg
                 | x `isFunc` ["ra"] = -- Random/choice
-                    random smesg >>= return . ChannelMsg
+                    allowFuncThen allowRandom $ do
+                        random smesg >>= return . ChannelMsg
                 | x `isFunc` ["$"] = -- Variable storing
-                    variable carg (bisectAt ' ' smesg) >>= return . ChannelMsg
+                    allowFuncThen allowVariable $ do
+                        variable carg (bisectAt ' ' smesg) >>= return . ChannelMsg
                 | x `isFunc` ["tr"] = -- Translate
-                    translate carg smesg >>= return . ChannelMsg
+                    allowFuncThen allowTranslate $ do
+                        translate carg smesg >>= return . ChannelMsg
                 | x `isFunc` ["we"] = -- Weather
-                    weather smesg >>= return . ChannelMsg
+                    allowFuncThen allowWeather $ do
+                        weather smesg >>= return . ChannelMsg
                 | x `isFunc` ["^"] = -- Last message / message history
-                    lastMsg smesg >>= return . ChannelMsg
+                    allowFuncThen allowHistory $ do
+                        lastMsg smesg >>= return . ChannelMsg
                 | isCTCP x = -- CTCP message
                     let xs = tail x
                     in case () of
@@ -101,27 +115,30 @@ msgInterpret str =
                 | x == ">>" = do
                     -- add laziness to this
                     -- check if it's necessary to execute it or not
-                    post <- fmap fromMsg $ postIO cmd
-                    let act = unwords xs
-                    liftIO $ when (verbosity > 1) $ putStrLn $ "Act: " ++ show act ++ "\nPost: " ++ show post
-                    msgI <- msgInterpret act
-                    return msgI
+                    allowFuncThen allowBind $ do
+                        post <- fmap fromMsg $ postIO cmd
+                        let act = unwords xs
+                        liftIO $ when (verbosity > 1) $ putStrLn $ "Act: " ++ show act ++ "\nPost: " ++ show post
+                        msgI <- msgInterpret act
+                        return msgI
                 | x == "->" = do
-                    post <- fmap fromMsg $ postIO cmd
-                    let func     = unwords . takeWhile notAnyOper $ xs
-                        funcTail = unwords . dropWhile notAnyOper $ xs
-                    liftIO . when (verbosity > 1) $ do
-                        putStrLn $ "Act: " ++ show func ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show funcTail
-                    msgI <- msgInterpret $ func ++ ' ' : post ++ ' ' : funcTail
-                    return msgI
+                    allowFuncThen allowPipe $ do
+                        post <- fmap fromMsg $ postIO cmd
+                        let func     = unwords . takeWhile notAnyOper $ xs
+                            funcTail = unwords . dropWhile notAnyOper $ xs
+                        liftIO . when (verbosity > 1) $ do
+                            putStrLn $ "Act: " ++ show func ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show funcTail
+                        msgI <- msgInterpret $ func ++ ' ' : post ++ ' ' : funcTail
+                        return msgI
                 | x == "++" = do
-                    post <- fmap fromMsg $ postIO cmd
-                    let add     = unwords . takeWhile notAnyOper $ xs
-                        addTail = (' ':) . unwords . dropWhile notAnyOper $ xs
-                    liftIO . when (verbosity > 1) $ do
-                        putStrLn $ "Act: " ++ show add ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show addTail
-                    msgI <- msgInterpret $ add ++ addTail
-                    return (msgType msgI $ post ++ " " ++ fromMsg msgI)
+                    allowFuncThen allowAdd $ do
+                        post <- fmap fromMsg $ postIO cmd
+                        let add     = unwords . takeWhile notAnyOper $ xs
+                            addTail = (' ':) . unwords . dropWhile notAnyOper $ xs
+                        liftIO . when (verbosity > 1) $ do
+                            putStrLn $ "Act: " ++ show add ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show addTail
+                        msgI <- msgInterpret $ add ++ addTail
+                        return (msgType msgI $ post ++ " " ++ fromMsg msgI)
                 | otherwise = postIO cmd
         handlebinds opers
     else return EmptyMsg
@@ -189,7 +206,7 @@ airing' args = do
         animes' = take amount $ genAnime animes
     return animes'
   where genAnime :: [String] -> [String]
-        genAnime (animetitle:eta:time:_:xs) = istrip (unwords ["\ETX10" ++ strip animetitle ++ "\ETX", "\ETX13" ++ (strip . drop 16) eta ++ "\ETX", "(" ++ drop 10 time ++ ")"]) : genAnime xs
+        genAnime (animetitle:eta:time:_:xs) = istrip (unwords ["\ETX10" ++ strip animetitle ++ "\ETX", "\ETX13" ++ (strip . drop 16) eta ++ "\ETX", "(" ++ drop 7 time ++ ")"]) : genAnime xs
         genAnime _                   = []
 
 -- Front-end for airing', returning a joined list instead

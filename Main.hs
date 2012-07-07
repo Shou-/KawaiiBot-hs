@@ -37,17 +37,17 @@ TODO:
     Core data needs to be parsed, such as `getservers'.
     Make reusable functions instead of bloating up the code everywhere you バカ外人！
     Make Core use the Memory reader Monad?
-    Function and channel blacklist
+    Write a `diff' function for the `anime', `manga', `airing', etc. for timed events.
+        f x y = filter (not . (`elem` y)) x
+    Add `owner' to Server data.
+        Be able to control KawaiiBot through ownership
+            Quit servers/channels
+            Join Servers/channels
+            Other stuff
 
 IMPORTANT:
-    Make it more memory efficient
-        Replace Strings with Text
     Add more lewdness
         Random adjecatives
-        50% chance of printing a lewd line every hour (or longer if too frequent)
-          This needs a maintained user list or something.
-          Alternatively, pull a random username from the logs, unless the logs
-          are disabled, in which we either print an empty nick or somehow obtain one.
         Change the lewd file's syntax and add the adjecatives there.
 -}
 

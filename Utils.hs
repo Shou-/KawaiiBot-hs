@@ -33,7 +33,9 @@ import Types
 import Codec.Binary.UTF8.String (encodeString, decodeString)
 import Control.Concurrent
 import Control.Exception
+import qualified Control.Monad as M
 import Control.Monad.Reader
+import Data.Char (toUpper, toLower)
 import Data.Maybe (fromJust, listToMaybe)
 import Data.String.Utils (split, replace)
 import qualified Data.Text as T
@@ -59,6 +61,39 @@ isChannelMsg _ = False
 getByServerURL :: [Server] -> String -> Maybe Server
 getByServerURL xs s = foldr f Nothing xs
   where f = (\x acc -> if serverURL x == s then Just x else acc)
+
+allowFuncThen :: (Funcs -> Bool) -> Memory Message -> Memory Message
+allowFuncThen f m = do
+    func <- getFunc f
+    if func
+        then m
+        else return EmptyMsg
+
+getFunc :: (Funcs -> Bool) -> Memory Bool
+getFunc f = do
+    config <- asks getConfig
+    meta <- asks getMeta
+    let servers = serversC config
+        mServer :: Maybe Server
+        mServer = findServer servers (getServer meta)
+                -- this needs to be case-insensitive
+        mFuncs = fmap (insLookup (getDestino meta) . allowedFuncs) mServer
+        func :: Bool
+        func = safeFromMaybe False . fmap f . M.join $ mFuncs
+    return func
+
+insLookup :: String -> [(String, b)] -> Maybe b
+insLookup _ [] = Nothing
+insLookup s ((s',b):xs) = if s `insEq` s' then Just b else insLookup s xs
+
+-- Make this lazier
+insEq :: String -> String -> Bool
+insEq a b = let (bool, v) = foldl f (True, a) b
+            in if length v > 0 then False else bool
+  where f (_, []) x = (False, [])
+        f (b, (y:ys)) x = if x `elem` [toUpper y, toLower y]
+            then (b, ys)
+            else (False, [])
 
 cutoff :: String -> Int -> String
 cutoff s n = if length s > n then (take n s) ++ "…" else s
@@ -224,6 +259,10 @@ fromMaybeString :: Maybe String -> String
 fromMaybeString (Just a) = a
 fromMaybeString Nothing  = []
 
+safeFromMaybe :: a -> Maybe a -> a
+safeFromMaybe _ (Just a) = a
+safeFromMaybe a Nothing = a
+
 isElemText :: Text.XML.Light.Content -> Bool
 isElemText (Text _) = True
 isElemText _        = False
@@ -271,8 +310,8 @@ findServer (server@(Server _ url _ _ _ _ _):xs) s = if s == url
     then Just server
     else findServer xs s
 
-injectEvents events (Config s1 _ f1 f2 f3 s2 b1 b2 i) =
-    Config s1 events f1 f2 f3 s2 b1 b2 i
+injectEvents events (Config s1 _ f1 f2 f3 s2 b2 i) =
+    Config s1 events f1 f2 f3 s2 b2 i
 
 injectMeta :: Meta -> MetaConfig -> MetaConfig
 injectMeta meta (MetaConfig _ config) = MetaConfig meta config

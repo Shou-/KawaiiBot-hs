@@ -64,7 +64,6 @@ data Config = Config { serversC :: [Server]
                      , logsPathC :: FilePath
                      , variablePathC :: FilePath
                      , msAppIdC :: String
-                     , titleFetchingC :: Bool
                      , msgLoggingC :: Bool
                      , verbosityC :: Int
                      }
@@ -75,7 +74,6 @@ defaultConfig = Config { serversC = []
                        , logsPathC = ""
                        , variablePathC = ""
                        , msAppIdC = ""
-                       , titleFetchingC = False
                        , msgLoggingC = False
                        , verbosityC = 1
                        }
@@ -86,7 +84,7 @@ data Server = Server { serverPort :: Int
                      , serverNick :: String
                      , serverNSPass :: String
                      , allowedChannels :: Allowed [String]
-                     , allowedFuncs :: [(String, [Allowed String])]
+                     , allowedFuncs :: [(String, Funcs)]
                      } deriving (Show)
 
 defaultServer = Server { serverPort = 6667
@@ -122,6 +120,45 @@ data Meta = Meta { getDestino :: String
                  , getServer :: String
                  , getOwnNick :: String
                  } deriving (Show, Eq)
+
+data Funcs = Funcs { allowPrint :: Bool
+                   , allowTitle :: Bool
+                   , allowWeather :: Bool
+                   , allowAnime :: Bool
+                   , allowAiring :: Bool
+                   , allowManga :: Bool
+                   , allowWiki :: Bool
+                   , allowIsup :: Bool
+                   , allowSed :: Bool
+                   , allowLewd :: Bool
+                   , allowRandom :: Bool
+                   , allowHistory :: Bool
+                   , allowVariable :: Bool
+                   , allowTranslate :: Bool
+                   , allowBind :: Bool
+                   , allowPipe :: Bool
+                   , allowAdd :: Bool
+                   } deriving (Show)
+
+defaultFuncs = Funcs { allowPrint = True
+                     , allowTitle = False
+                     , allowWeather = True
+                     , allowAnime = True
+                     , allowAiring = True
+                     , allowManga = True
+                     , allowWiki = True
+                     , allowIsup = True
+                     , allowSed = True
+                     , allowLewd = True
+                     , allowRandom = True
+                     , allowHistory = True
+                     , allowVariable = True
+                     , allowTranslate = False
+                        -- Operators
+                     , allowBind = False
+                     , allowPipe = True
+                     , allowAdd = True
+                     }
 
 emptyMeta = Meta [] [] [] [] [] [] []
 

@@ -28,6 +28,7 @@ import Utils
 import Control.Concurrent
 import Control.Exception
 import Control.Monad hiding (join)
+import qualified Control.Monad as M
 import Control.Monad.Reader hiding (join)
 import Data.List
 import qualified Data.Text as T
@@ -127,7 +128,7 @@ parse h bs = do
                     meta' = Meta dest nick name host channels serverurl ownnick
                 local (injectMeta meta') $ do
                     meta <- asks getMeta
-                    titleFetching <- asks (titleFetchingC . getConfig)
+                    titleFetching <- getFunc allowTitle
                     msgLogging <- asks (msgLoggingC . getConfig)
 
                     when titleFetching . void . forkMe $ do -- URL fetching
