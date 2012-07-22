@@ -37,8 +37,8 @@ Example: `.^ 10`
 Variable storing/fetching function.<br>
 It takes one optional colon argument, the user who should take ownership of the variable, and a string in the variable syntax.<br>
 Example: `.$:friend Reminder linux = Please remember to install a distribution of your choice!`<br>
-Example: `.$ linux`
-Example: `.$ Remove linux = I don't like this anymore`
+Example: `.$ linux`<br>
+Example: `.$ Remove linux = I don't like this anymore`<br>
 Where `Reminder` is optional and can be replaced with `Personal`, `Immutable` or `Normal`. The second example just prints the variable contents.<br>
 `Personal`: Only printable by the variable owner. `Reminder`: Same as personal, but may be printed when the variable owner joins the channel. `Immutable`: Can only be modified by the owner. `Normal`: Printable and modifiable by all. `Remove`: Deletes a variable.
 
