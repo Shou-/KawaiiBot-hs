@@ -16,7 +16,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -}
 
-{- Some of this is outdated since the Core rewrite
+{-
 TODO:
     Finish all the functions
         - Translate
@@ -24,31 +24,50 @@ TODO:
         - Dictionary
         - Variable
             - Needs to be rewritten.
+            - Give ownership of variables to others through colon argument.
+            - Reminder, Personal, Immutable, Normal.
+            - Print "Anon: You have n reminders: variable1, variable2, ..."
+              on join
+            - Global variables
+            - Proposed syntax:
+                .$:nick Immutable varname = varcontents
         - Calc
             - Needs to be rewritten.
         - Sed
             - Needs to be rewritten.
-        - Alias
-    Add more entries to help
-    Make msgInterpret return [String] instead of String?
-    Replace anonymous functions with named functions for readability?
-    Add command line arguments, such as making it not autojoin any servers/channels and instead only join ones specified by a certain parameter.
+        - Help
+            - Make it print whether the function/operator is black/whitelisted
+              or not.
+        - AniDB
+        - Lambdas ?
+            - .\ x y => .an:x y
+            - Can be stored in .$ variables
+            - Can be used with planned parens
+        - Diff
+            f x y = filter (not . (`elem` y)) x
+    Add command line arguments, such as making it not autojoin any
+    servers/channels and instead only join ones specified by a certain parameter.
     Clean up Utils.hs
     Core data needs to be parsed, such as `getservers'.
-    Make reusable functions instead of bloating up the code everywhere you バカ外人！
-    Make Core use the Memory reader Monad?
-    Write a `diff' function for the `anime', `manga', `airing', etc. for timed events.
-        f x y = filter (not . (`elem` y)) x
     Add `owner' to Server data.
         Be able to control KawaiiBot through ownership
             Quit servers/channels
             Join Servers/channels
             Other stuff
-
-IMPORTANT:
+    Add operator escaping or make certain functions ignore operators.
+    Add parens for the functions/operators
+        `.lewd -> (.ra 100 -> .sed s/matcher/replacer/)`
+    Add timeouts between usage of functions that can becustomized per channel
+    in Config.hs.
+        Per channel and user or just channel timeout?
+    Let `events' store data for later use.
+        Make event functions loop in their own threads and pass data to each
+        other. This will allow functions such as `diff' to work properly.
+            Even functions that output the same to all channels.
+            Odd functions that run the event function for each channel.
     Add more lewdness
-        Random adjecatives
-        Change the lewd file's syntax and add the adjecatives there.
+        Random adjecatives, verbs and body parts.
+        Change the lewd file's syntax.
 -}
 
 module Main where
@@ -95,7 +114,7 @@ mainTest = forever $ do
     line <- liftIO getLine
     let msg = "localhost:Owner!Owner@control PRIVMSG #KawaiiBot :" ++ line
     parse stdout msg
-  where meta = Meta dest nick name host chans server ownnick
+  where meta = Meta dest nick name host chans server temp
         dest = "#KawaiiBot"
         nick = "Owner"
         name = "Owner"
@@ -103,4 +122,4 @@ mainTest = forever $ do
         userlist = [('~', "Owner"), ('&', "KawaiiBot")]
         chans = ["#KawaiiBot"]
         server = "localhost"
-        ownnick = "KawaiiBot"
+        temp = []

@@ -25,221 +25,273 @@ module Bot where
 import Types
 import Utils
 
+import Control.Applicative
 import Control.Exception
 import Control.Monad hiding (join)
+import qualified Control.Monad as M
 import Control.Monad.Reader hiding (join)
-import Data.List (isInfixOf)
+import Data.Char
+import Data.List
 import Data.Foldable (foldr')
 import Data.Maybe (fromJust, listToMaybe)
 import Data.String.Utils
+import Data.Tuple
 import Network.Curl
 import System.IO
 import System.Random (randomRIO)
-import Text.Regex (subRegex, mkRegex)
+import Text.Regex
 import Text.JSON
 import Text.XML.Light
+import Debug.Trace
 
 
--- Interpret messages and change the data into whatever the functions return
--- Splits the message on bind operators and uses recursion to execute all as separate functions
--- The boolean returned decides whether it's a destination message (True) or user message (False).
-msgInterpret :: String -- String received from the IRC server
-             -> Memory Message
-msgInterpret str =
-    if words str /= [] then do
-        verbosity <- asks (verbosityC . getConfig)
-        let cmd       = takeWhile (/= ':') $ takeWhile (/= ' ') str
-            carg      = concat . fmap (split ":") . take 1 . words $ str
-            smesg     = unwords . takeWhile notAnyOper . tail $ words str
-            opers     = dropWhile notAnyOper $ words str
-            postIO :: String -> Memory Message
-            postIO x
-                | x `isFunc` [">"] = -- Public message
-                    allowFuncThen allowPrint $ do
-                        return $ ChannelMsg smesg
-                | x `isFunc` ["<"] = -- Private message
-                    allowFuncThen allowPrint $ do
-                        return $ UserMsg smesg
-                | x `isFunc` ["help", "?"] = -- Help about commands
-                    return . UserMsg $ help smesg
-                | x `isFunc` ["isup"] = -- return isup.me's title
-                    allowFuncThen allowIsup $
-                        let url = "http://isup.me/" ++ removePrefixes ["https://", "http://"] smesg
-                        in title url >>= return . ChannelMsg . replace "Huh" "Nyaa" . unwords . take 4 . words
-                | x `isFunc` ["lewd"] = -- Lewd messages
-                    allowFuncThen allowLewd $ do
-                        lewd >>= return . UserMsg
-                | x `isFunc` ["wiki"] = -- Wikipedia summary
-                    allowFuncThen allowWiki $ do
-                        wiki smesg >>= return . ChannelMsg
-                | x `isFunc` ["sed"] = do -- Regex replace
-                    allowFuncThen allowSed $ do
-                        e <- liftIO (try (return $ sed smesg) :: IO (Either SomeException String))
-                        case e of
-                            Right e -> return $ ChannelMsg e
-                            Left e -> liftIO (print e) >> return EmptyMsg
-                | x `isFunc` ["ai"] = -- Recently airing anime
-                    allowFuncThen allowAiring $ do
-                        airing carg >>= return . ChannelMsg
-                | x `isFunc` ["an"] = -- Recent anime / anime search
-                    allowFuncThen allowAnime $ do
-                        anime smesg carg >>= return . ChannelMsg
-                | x `isFunc` ["ma"] = -- Recent manga / manga search
-                    allowFuncThen allowManga $ do
-                        manga smesg carg >>= return . ChannelMsg
-                | x `isFunc` ["ra"] = -- Random/choice
-                    allowFuncThen allowRandom $ do
-                        random smesg >>= return . ChannelMsg
-                | x `isFunc` ["$"] = -- Variable storing
-                    allowFuncThen allowVariable $ do
-                        variable carg (bisectAt ' ' smesg) >>= return . ChannelMsg
-                | x `isFunc` ["tr"] = -- Translate
-                    allowFuncThen allowTranslate $ do
-                        translate carg smesg >>= return . ChannelMsg
-                | x `isFunc` ["we"] = -- Weather
-                    allowFuncThen allowWeather $ do
-                        weather smesg >>= return . ChannelMsg
-                | x `isFunc` ["^"] = -- Last message / message history
-                    allowFuncThen allowHistory $ do
-                        lastMsg smesg >>= return . ChannelMsg
-                | isCTCP x = -- CTCP message
-                    let xs = tail x
-                    in case () of
-                      _ | take 7 (tail x) == "VERSION" -> return . UserMsg $ "VERSION "++ botversion
-                        | otherwise -> return EmptyMsg
-                | otherwise = -- Fallback
-                    liftIO (print str) >> return EmptyMsg
-            handlebinds :: [String] -> Memory Message
-            handlebinds [] = postIO cmd
-            handlebinds (x:xs)
-                | x == ">>" = do
-                    -- add laziness to this
-                    -- check if it's necessary to execute it or not
-                    allowFuncThen allowBind $ do
-                        post <- fmap fromMsg $ postIO cmd
-                        let act = unwords xs
-                        liftIO $ when (verbosity > 1) $ putStrLn $ "Act: " ++ show act ++ "\nPost: " ++ show post
-                        msgI <- msgInterpret act
-                        return msgI
-                | x == "->" = do
-                    allowFuncThen allowPipe $ do
-                        post <- fmap fromMsg $ postIO cmd
-                        let func     = unwords . takeWhile notAnyOper $ xs
-                            funcTail = unwords . dropWhile notAnyOper $ xs
-                        liftIO . when (verbosity > 1) $ do
-                            putStrLn $ "Act: " ++ show func ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show funcTail
-                        msgI <- msgInterpret $ func ++ ' ' : post ++ ' ' : funcTail
-                        return msgI
-                | x == "++" = do
-                    allowFuncThen allowAdd $ do
-                        post <- fmap fromMsg $ postIO cmd
-                        let add     = unwords . takeWhile notAnyOper $ xs
-                            addTail = (' ':) . unwords . dropWhile notAnyOper $ xs
-                        liftIO . when (verbosity > 1) $ do
-                            putStrLn $ "Act: " ++ show add ++ "\nPost: " ++ show post ++ "\nAct tail: " ++ show addTail
-                        msgI <- msgInterpret $ add ++ addTail
-                        return (msgType msgI $ post ++ " " ++ fromMsg msgI)
-                | otherwise = postIO cmd
-        handlebinds opers
-    else return EmptyMsg
-  where notAnyOper = (\x -> not $ x `elem` [">>", "->", "++"])
-        isFunc x y = x `elem` [v : y' | y' <- y, v <- ['.', '!']]
-        isCTCP ('\SOH':xs) = True
-        isCTCP _ = False
+parser :: String -> Memory (Message String)
+parser x = interpret . toFuna $ words x
 
--- Holy fukc this sucks
--- Regex replace function for msgInterpret
-sed :: String -> String
-sed [] = []
-sed (_:s) =
-    let escaped = replace "\\/" "\t" . replace "\\\\" "\n" $ s
-        escapeds = map (replace "\t" "/") . map (replace "\n" "\\") $ split "/" escaped
-    in if length escapeds > 2 then
-        let match = escapeds !! 0
-            result = escapeds !! 1
-            message = tail . join "/" $ drop 2 escapeds
-        in subRegex (mkRegex match) message result
-    else ""
+-- Words to Funa data
+toFuna :: [String] -> Funa
+toFuna xs =
+    let (head', tail') = breakLate isFuna xs
+        len = length head'
+    in case () of
+      _ | len < 1 -> Void
+        | len == 1 -> Plain $ head head'
+        | len > 1 ->
+            let op = last head'
+            in if isFuna op
+                then (readFuna op) (unwords $ init head') $ toFuna tail'
+                else Plain $ unwords head'
+  where isFuna = (`elem` [">>", "++", "->", "$$"])
+        readFuna "++" = Add
+        readFuna "->" = Pipe
+        readFuna ">>" = Bind
+        readFuna "$$" = App
+
+-- Parse the Funa data and use `run' where necessary
+---- TODO: Add `allowThen' here
+interpret :: Funa -> Memory (Message String)
+interpret Void = return EmptyMsg
+interpret (Plain s) = run s
+interpret (Add s f) = allowThen allowAdd $ do
+    rs <- run s
+    ex <- interpret f
+    return $ rs `mergeMsg` ex
+interpret (Bind s f) = allowThen allowBind $ interpret f
+interpret (Pipe s f) = allowThen allowPipe $ run s >>= interpret . deepPipe f
+interpret (App s f) = allowThen allowApp $ do
+    ex <- fmap fromMsg $ interpret f
+    run $ s ++ " " ++ ex
+
+run :: String -> Memory (Message String)
+run x =
+    let (fcmd, fstring) = break (not . (/= ' ')) x
+        (cmd : args) = split ":" fcmd
+        string = dropWhile (== ' ') fstring
+    in case () of
+      _ | cmd `isCmd` ">" -> -- Public message
+            allowThen allowEcho $
+                echo ChannelMsg args string
+        | cmd `isCmd` "<" -> -- Private message
+            allowThen allowEcho $
+                echo UserMsg args string
+        | cmd `isCmd` "^" -> -- Last message / message history
+            allowThen allowHistory $
+                lastMsg args string
+        | cmd `isCmd` "$" -> -- Variable storing / fetching
+            allowThen allowVariable $
+                variable2 args string
+        | cmd `isCmd` "help" -> -- Help function
+            help args string
+        | cmd `isCmd` "ai" -> -- Current anime airtimes
+            allowThen allowAiring $
+                airing args string
+        | cmd `isCmd` "an" -> -- Recent anime releases
+            allowThen allowAnime $
+                anime args string
+        | cmd `isCmd` "isup" -> -- Website status
+            allowThen allowIsup $
+                isup args string
+        | cmd `isCmd` "lewd" -> -- Lewd message
+            allowThen allowLewd $
+                lewd args string
+        | cmd `isCmd` "ma" -> -- Recent manga releases
+            allowThen allowManga $
+                manga args string
+        | cmd `isCmd` "ra" -> -- Random / choice
+            allowThen allowRandom $
+                random args string
+        | cmd `isCmd` "sed" -> -- Regular expression replace
+            allowThen allowSed $
+                sed2 args string
+        | cmd `isCmd` "tr" -> -- Translate 
+            allowThen allowTranslate $
+                translate args string
+        | cmd `isCmd` "we" -> -- Weather
+            allowThen allowWeather $
+                weather args string
+        | cmd `isCmd` "wiki" -> -- Wikipedia
+            allowThen allowWiki $
+                wiki args string
+        | x `isCTCP` "VERSION" -> -- CTCP VERSION message
+                return . UserMsg $ "VERSION " ++ botversion
+        | otherwise -> return EmptyMsg
+  where isCmd (x:xs) cmd = and $ [x `elem` ".!", xs == cmd]
+        isCmd _ _ = False
+        isCTCP ('\SOH':xs) y = y `isPrefixOf` xs
+        isCTCP _ _ = False
+
+deepPipe :: Funa -> Message String -> Funa
+deepPipe Void _ = Void
+deepPipe (Plain s) m = Plain $ unwords [s, fromMsg m]
+deepPipe (Add s f) m = Add (unwords [s, fromMsg m]) f
+deepPipe (Bind s f) m = Bind (unwords [s, fromMsg m]) f
+deepPipe (Pipe s f) m = Pipe (unwords [s, fromMsg m]) f
+deepPipe (App s f) m = App (unwords [s, fromMsg m]) f
+
+echo :: (String -> Message String)
+     -> [String] 
+     -> String 
+     -> Memory (Message String)
+echo f _ s = return (f s)
+
+channelMsg, userMsg :: [String] -> String -> Memory (Message String)
+channelMsg = echo ChannelMsg
+userMsg = echo UserMsg
+
+sed2 :: [String] -> String -> Memory (Message String)
+sed2 _ ('s':x:xs) = do
+    let f :: (Bool, (Int, ((String, String), String))) 
+          -> Char 
+          -> (Bool, (Int, ((String, String), String)))
+        f (True, (n, ((a, b), c))) x'
+            | n == 1 && x' == x = (False, (n, ((a ++ [x'], b), c)))
+            | n == 1 = (False, (n, ((a ++ ['\\', x'], b), c)))
+            | n == 2 && x' == x = (False, (n, ((a, b ++ [x']), c)))
+            | n == 2 = (False, (n, ((a, b ++ ['\\', x']), c)))
+            | otherwise = (False, (n, ((a, b), c ++ ['\\', x'])))
+        f (False, (n, ((a, b), c))) x'
+            | n == 1 && x' == x = (False, (2, ((a, b), c)))
+            | n == 1 && x' == '\\' = (True, (n, ((a, b), c)))
+            | n == 1 = (False, (n, ((a ++ [x'], b), c)))
+            | n == 2 && x' == x = (False, (3, ((a, b), c)))
+            | n == 2 && x == '\\' = (True, (n, ((a, b), c)))
+            | n == 2 = (False, (n, ((a, b ++ [x']), c)))
+            | otherwise = (False, (n, ((a, b), c ++ [x'])))
+        (_, (_, ((match, replacement), string))) = foldl f (False, (1, (("", ""), ""))) xs
+        (ins, _:string') = break (== ' ') string
+        insensitive = ins `elem` ["i", "I"]
+        regex = mkRegexWithOpts match True insensitive
+    e <- liftIO $ try (return $! subRegex regex string' replacement) :: Memory (Either SomeException String)
+    case e of
+        Right a -> return $ ChannelMsg a
+        Left e -> return EmptyMsg
+sed2 _ _ = return EmptyMsg
+
+sed3 :: String -> Memory (Message String)
+sed3 _ = return EmptyMsg
 
 -- Core anime function
-anime' :: String -> [String] -> Memory [String]
-anime' str args = do
-    let sepFilter :: String -> (String, [String]) -> (String, [String])
-        sepFilter x (stracc, filacc) = if negateWord x
-            then (stracc, tail x : filacc)
-            else (' ' : x ++ stracc, filacc)
-        (str', filters) = foldr' sepFilter ("", []) $ words str
+anime' :: [String] -> String -> Memory [String]
+anime' args str = do
+    let (str', filters) = foldr' sepFilter ("", []) $ words str
         url = "https://tokyotosho.info/search.php?type=1&terms=" ++ urlEncode' str'
     html <- liftIO $ curlGetString' url []
     let elem' = fromMaybeElement $ parseXMLDoc html
         qname = QName "a" (Just "http://www.w3.org/1999/xhtml") Nothing
         attrs = [Attr (QName "type" Nothing Nothing) "application/x-bittorrent"]
-        elems = findElementsAttrs elem' qname attrs
+        elems = findElementsAttrs qname attrs elem'
         animes = map (strip . elemsText) elems
         animes' = filter (\x -> not . or $ map (`isInfixOf` x) filters) animes
         amount = if length args > 1 then (args !! 1) `safeRead` 10 else 10 :: Int
-    liftIO . putStrLn . take 100 . show $ elem'
     verbosity <- asks (verbosityC . getConfig)
     liftIO . when (verbosity > 1) $ do
         putStrLn $ "Filters: %(f); str': %(s)" % [("f", join ", " filters), ("s", str')]
     return $ take amount animes'
-  where negateWord :: String -> Bool
-        negateWord ('-':_) = True
-        negateWord _       = False
 
 -- Styled anime function
-anime :: String -> [String] -> Memory String
-anime str args = do
-    animes <- anime' str args
+anime :: [String] -> String -> Memory (Message String)
+anime args str = do
+    animes <- anime' args str
     let animes' = map (replace "[" "[\ETX13" . replace "]" "\ETX]") animes
-    return $ joinUntil ", " animes' 400
+    return . ChannelMsg $ joinUntil ", " animes' 400
 
--- Receive, parse and output recent anime airing times.
-airing' :: [String] -> Memory [String]
-airing' args = do
-    html <- liftIO $ curlGetString' ("http://www.mahou.org/Showtime/Showtime.html") []
-    let elem' = fromMaybeElement $ parseXMLDoc html
-        qname = QName "tr" Nothing Nothing
-        elems = findElements qname elem'
-        animes = map elemsText $ tail elems
+airing2 :: [String] -> String -> Memory [String]
+airing2 args str = do
+    let (str', filters) = foldr' sepFilter ("", []) $ words str
         amount = if length args > 1 then (args !! 1) `safeRead` 10 else 10 :: Int
-        animes' = take amount $ genAnime animes
-    return animes'
-  where genAnime :: [String] -> [String]
-        genAnime (animetitle:eta:time:_:xs) = istrip (unwords ["\ETX10" ++ strip animetitle ++ "\ETX", "\ETX13" ++ (strip . drop 16) eta ++ "\ETX", "(" ++ drop 7 time ++ ")"]) : genAnime xs
-        genAnime _                   = []
+        url = "http://www.mahou.org/Showtime/?o=ET"
+        isSearch = not $ null str
+    content <- liftIO $ curlGetString' url []
+    let elem = fromMaybeElement $ parseXMLDoc content
+        qTable = QName "table" Nothing Nothing
+        aSummary = [Attr (QName "summary" Nothing Nothing) "Currently Airing"]
+        table = findElementsAttrs qTable aSummary elem
+        table2 = M.join $ fmap (findElementsIn qTable) table
+        qTr = QName "tr" Nothing Nothing
+        trs :: [Element]
+        trs = drop 1 . M.join $ fmap (findElements qTr) table2
+        tds :: [[String]]
+        tds = fmap (fmap elemsText . contentsToEls . elContent) trs
+        f (_ : series : season : station : company : time : eta : xs) acc =
+            let seri = "\ETX10" ++ series ++ "\ETX"
+                tim' = "\ETX4" ++ time ++ "\ETX"
+                eta' = "(" ++ istrip eta ++ ")"
+                nonSearch = unwords [seri, tim', eta']
+                proSearch = unwords [ "\ETX5Series\ETX:", series
+                                    , "\ETX5Season\ETX:", season
+                                    , "\ETX5Time\ETX:", time
+                                    , "\ETX5ETA\ETX:", istrip eta
+                                    , "\ETX5Station\ETX:", station
+                                    , "\ETX5Company\ETX:", company
+                                    ]
+            in if isSearch then
+                let search = map (`isInfixOf` map toLower series)
+                in if or $ search filters then acc
+                    else if and . search . words $ map toLower str'
+                        then proSearch : acc
+                        else acc
+               else nonSearch : acc
+        backup = guard isSearch >> ["No results."]
+    return . take amount $ foldr f [] tds <|> backup
 
--- Front-end for airing', returning a joined list instead
-airing :: [String] -> Memory String
-airing args = do
-    airs <- airing' args
-    return $ joinUntil ", " airs 400
+-- Front-end for airing2, returning a joined list instead
+airing :: [String] -> String -> Memory (Message String)
+airing args str = do
+    airs <- airing2 args str
+    if null airs
+        then return EmptyMsg
+        else return . ChannelMsg $ joinUntil ", " airs 400
 
 -- Information about the IRC commands the bot provides
--- Incomplete
-help :: String -> String
-help s
-    | s == "bind"       = "Bind, or >>, is an operator that performs the function preceding it, but disregards the value returned."
-    | s == "lewd"       = "Prints a lewd message."
-    | s == "pipe"       = "Pipe, or ->, is an operator that takes the value of what precedes it and appends it to the argument of the next function."
-    | s == "add"        = "Add, or ++, is an operator that takes the value of what precedes it and appends it to the value of the next function."
-    | s == "sed"        = "Replaces text using regular expressions. Ex: .sed /probably should/should not/ You probably should help it."
-    | s == "ai"         = "Prints anime airing in the near future. Ex: .ai:10"
-    | s == "an"         = "Prints recent anime releases, can also be used to search. Ex: .an:3 Last Exile -Commie"
-    | s == "ma"         = "Prints recent manga releases, can also be used to search. Ex: .ma:5 Banana no Nana"
-    | s == "ra"         = "Prints a number from a range or a string choice split by `|'. Ex: .ra 1000; Ex: .ra Yes | No"
-    | s == "tr"         = "Translate a string. Ex: .tr:ja:en 日本語"
-    | s == "we"         = "Prints the weather for a specified location. Ex: .we Tokyo"
-    | s == ">"          = "Prints a string to the channel. Ex: .> hey"
-    | s == "<"          = "Prints a string to the user. Ex: .< hey"
-    | s == "^"          = "Gets a message from the history. Ex: .^ 3"
-    | s == "$"          = "Gets a stored variable. Ex: .$:immutable myVariableName My variable message."
-    | s == "github"     = "https://github.com/Shou-/KawaiiBot-hs"
-    | otherwise         = "Try `.help' and a value. Functions: >, <, ^, $, sed, ai, an, ma, ra, tr, we. Operators: bind, pipe, add. Extra: github"
+-- TODO: Make this more advanced by printing whether the function is allowed
+-- in this channel or not.
+help :: [String] -> String -> Memory (Message String)
+help _ str = do
+    
+    return . UserMsg $ getHelp str
+  where getHelp s
+            | s == "bind"       = "Bind, or >>. It executes the function on the left but ignores the output, and continues parsing the right."
+            | s == "pipe"       = "Pipe, or ->. It appends the output of the function on the left into the function on the right."
+            | s == "add"        = "Add, or ++. It appends the string of the output on the right to the output on the left."
+            | s == "app"        = "Application operator, or $$. It appends the output of the function on the right into the function on the left. The opposite of ->."
+            | s == ">"          = "Prints a string to the channel. Ex: .> hey"
+            | s == "<"          = "Prints a string to the user. Ex: .< hey"
+            | s == "^"          = "Gets a message from the channel history. Ex: .^ 3"
+            | s == "$"          = "Gets a stored variable. Ex: .$:immutable myVariableName My variable message."
+            | s == "ai"         = "Prints airtimes for this season's anime. Ex: .ai:1 yuru yuri"
+            | s == "an"         = "Prints recent anime releases, can also be used to search. Ex: .an:3 Last Exile -Commie"
+            | s == "lewd"       = "Prints a lewd message."
+            | s == "ma"         = "Prints recent manga releases, can also be used to search. Ex: .ma:5 Banana no Nana"
+            | s == "ra"         = "Prints a number from a range or a string choice split by `|'. Ex: .ra 1000; Ex: .ra Yes | No"
+            | s == "sed"        = "Replaces text using regular expressions. Ex: .sed /probably should/should not/ You probably should help it."
+            | s == "tr"         = "Translate a string. Ex: .tr:ja:en 日本語"
+            | s == "we"         = "Prints the weather for a specified location. Ex: .we Tokyo"
+            | s == "wiki"       = "Prints the introduction to an article. Ex: .wiki haskell programming language."
+            | otherwise         = "Try `.help' and a value. Functions: >, <, ^, $, sed, ai, an, ma, ra, tr, we. Operators: bind, pipe, add, app. More: http://github.com/Shou-/KawaiiBot-hs#readme"
 
 -- Read str as Int, or 0 if not number. Use it as an index for the history list. Fallback to `[]'.
-lastMsg :: String -> Memory String
-lastMsg str = do
+lastMsg :: [String] -> String -> Memory (Message String)
+lastMsg _ str = do
     meta <- asks getMeta
     logsPath <- asks (logsPathC . getConfig)
     let serverurl = getServer meta
@@ -251,17 +303,18 @@ lastMsg str = do
         Right history -> do
             let len = length history
                 n = if isNum . strip $ str then read str else 0 :: Int
-            if len > n
-                then return . snd $ history !! n
-                else return []
+                n' = if n >= 0 then n else 0
+            if len > n'
+                then return . ChannelMsg . snd $ history !! n'
+                else return EmptyMsg
         Left e -> do
             verbosity <- asks (verbosityC . getConfig)
             liftIO . when (verbosity > 1) $ print e
-            return []
+            return EmptyMsg
 
 -- Output lewd strings.
-lewd :: Memory String
-lewd = do
+lewd :: [String] -> String -> Memory (Message String)
+lewd _ _ = do
     meta <- asks getMeta
     lewdPath <- asks (lewdPathC . getConfig)
     file <- liftIO $ readFile lewdPath
@@ -269,55 +322,64 @@ lewd = do
     let obj = [("nick", getUsernick meta), ("adj1", adj1s !! randomadj1)]
         lewds = map (\x -> read x % obj) . lines $ file
     randomlewd <- liftIO $ randomRIO (0, pred $ length lewds)
-    return $ lewds !! randomlewd
+    return . UserMsg $ lewds !! randomlewd
   where adj1s = [ "hard"
                 , "wet"
                 , "delicious"
                 , "pink"
-                , "sticky"]
+                , "sticky"
+                , "slippery"
+                ]
 
--- Receive, parse and output recent, or specific, manga titles and related information.
-manga :: String -> [String] -> Memory String
-manga str cargs = do
-    let url = "https://www.mangaupdates.com/releases.html?act=archive&search=" ++ urlEncode' str
-    html <- liftIO $ curlGetString' url []
+-- Recent manga releases and searching function
+manga :: [String] -> String -> Memory (Message String)
+manga cargs str = do
+    let burl = "https://www.mangaupdates.com/releases.html?act=archive&search="
+    html <- liftIO $ curlGetString' (burl ++ urlEncode' str) []
     let elem' = fromMaybeElement $ parseXMLDoc html
         qname = QName "td" Nothing Nothing
         attrs = [Attr (QName "class" Nothing Nothing) "text pad"]
-        elems = findElementsAttrs elem' qname attrs
+        elems = findElementsAttrs qname attrs elem'
         elems' = map elemsText elems
         -- Generate a list of colored strings
         genMangas :: [String] -> [String]
         genMangas (date:mangatitle:vol:chp:group:rest) =
-            let mangaStr = concat [ "\x03", "12[", strip group, "]\x03 ",
-                                    mangatitle, " [Ch.\x03", "13", chp, "\x03",
-                                    "Vol.\x03", "13", vol, "\x03] (\x03", "13",
-                                    date, "\x03)"]
+            let mangaStr = unwords [ "\ETX12[" ++ strip group ++ "]\ETX"
+                                   , mangatitle
+                                   , "[Ch.\ETX13" ++ chp ++ "\ETX,"
+                                   , "Vol.\ETX13" ++ vol ++ "\ETX]"
+                                   , "(\ETX13" ++ date ++ "\ETX)"
+                                   ]
             in mangaStr : genMangas rest
         genMangas _ = []
         maybeAmount =
             if length cargs > 1
                 then fmap fst . listToMaybe . reads $ cargs !! 1
-                else Just 10 :: Maybe Int
+                else Just 10
         amount =
             if maybeAmount /= Nothing
                 then fromJust maybeAmount 
                 else 10
         mangas = take amount $ genMangas elems'
-    return $ joinUntil ", " mangas 400
+    return . ChannelMsg $ joinUntil ", " mangas 400
 
 -- Pick a random choice or number
-random :: String -> Memory String
-random str
-    | isNum str = liftIO (randomRIO (0, read str :: Integer)) >>= return . show
-    | otherwise =
+random :: [String] -> String -> Memory (Message String)
+random args str
+    | isNum str = do
+        n <- liftIO (randomRIO (0, read str :: Integer))
+        return . ChannelMsg $ show n
+    | otherwise = do
         let choices = split "|" str
             len = length choices
-        in liftIO (randomRIO (0, len - 1)) >>= return . (choices !!)
+        n <- liftIO (randomRIO (0, len - 1))
+        if len > 0
+            then return . ChannelMsg $ choices !! n
+            else return EmptyMsg
 
--- Receive, parse and output the title, or otherwise specified text.
-title :: MonadIO m => String -> m String
-title url = do
+-- Website title function
+title :: String -> Memory (Message String)
+title str = do
     let opts = [ CurlFollowLocation True
                , CurlTimeout 5
                , CurlMaxFileSize (1024 * 1024 * 5)
@@ -328,8 +390,7 @@ title url = do
                                          , "Firefox/10.0.2"
                                          ]
                ]
-
-    response <- liftIO $ curlGetResponse url opts
+    response <- liftIO $ curlGetResponse str opts
     let headers = respHeaders response
         contentTypeResp = headers `tupleListGet` "Content-Type"
         contentResp = respBody response
@@ -339,22 +400,21 @@ title url = do
                         then Element (QName "" Nothing Nothing) [] [] Nothing
                         else fromJust maybeElems
             getTitle :: [Element]
-            getTitle = filterElements (\element -> if (qName . elName $ element) == "title" then True else False) elems
-            special = (if not . isNothing $ specialElem
-                            then (++ " ") . elemsText . head' . (fromJust specialElem) $ elems 
-                            else []) `cutoff` 200
+            getTitle = filterElements ((== "title") . qName . elName) elems
+            special = let f = fromJust $ specialElem <|> Just (\_ -> [])
+                      in (`cutoff` 200) . (++ " ") . elemsText . head' $ f elems
             pagetitle = ((special ++ " ") ++) . unwords . map elemsText $ getTitle
-        return . istrip . replace "\n" " " $ pagetitle
-    else
-        return []
+        return . ChannelMsg . istrip . replace "\n" " " $ pagetitle
+    else do
+        return EmptyMsg
   where specialElem :: Maybe (Element -> [Element])
         specialElem
-            | '#' `elem` url =
-                let elemID = tail $ dropWhile (/= '#') url
+            | '#' `elem` str =
+                let elemID = tail $ dropWhile (/= '#') str
                     attrs = [Attr (QName "id" Nothing Nothing) elemID]
-                    f x = findElementsAttrs x (QName "" Nothing Nothing) attrs
+                    f x = findElementsAttrs (QName "" Nothing Nothing) attrs x
                 in Just f
-            | let surl = split "/" url
+            | let surl = split "/" str
               in surl !! 2 == "boards.4chan.org" && surl !! 4 == "res" =
                     Just $ findElements (QName "blockquote" Nothing Nothing)
             | otherwise = Nothing
@@ -362,14 +422,21 @@ title url = do
         head' (x:_) = x
         head' _     = Element (QName "" Nothing Nothing) [] [] Nothing
 
+-- Check if website is up
+isup :: [String] -> String -> Memory (Message String)
+isup _ str = do
+    let url = "http://isup.me/" ++ removePrefixes ["https://", "http://"] str
+    title' <- fmap fromMsg $ title url
+    return . ChannelMsg . replace "Huh" "Nyaa" . unwords . take 4 . words $ title'
+
 -- Translate text to another language
 -- TODO: Replace with Microsoft Translate -- U FRUSTRATED U FRUSTRATED GOOGLE Y U SO MAAAAAAAAAAAAAAAAAAD
-translate :: [String] -> String -> Memory String
+translate :: [String] -> String -> Memory (Message String)
 translate args str = do
     msAppId <- asks (msAppIdC . getConfig)
     verbosity <- asks (verbosityC . getConfig)
     case msAppId of
-        "" -> return []
+        "" -> return EmptyMsg
         _ -> do
             let from = show $ if length args > 1 then args !! 1 else ""
                 to = show $ if length args > 2 then args !! 2 else "en"
@@ -387,112 +454,84 @@ translate args str = do
                 result = decode jsonStr' :: Result [JSObject JSValue]
                 result' = fmap (fmap snd . (`tupleMaybeGet` "TranslatedText") . fromJSObject . (!! 0)) result
                 text = fromMaybeString $ fmap fromJSString (getOut result')
-            return text
+            return $ ChannelMsg text
   where getOut (Ok (Just (JSString a))) = Just a
         getOut _ = Nothing
 
--- rewrite `Variable'
--- Add:
----- Return specific variable (Reminder only, etc)
------- Can be solved if you pass a function to it
----- Private variables that are stored under the user's nick
----- and Public variables that are owned by the channel, and duplicates cannot exist
+-- Global variables
+-- Nicer variable function
+variable2 :: [String] -> String -> Memory (Message String)
+variable2 args str = do
+    varPath <- asks (variablePathC . getConfig)
+    nick <- asks (getUsernick . getMeta)
+    dest <- asks (getDestino . getMeta)
+    server <- asks (getServer . getMeta)
+    let nick' = (!! 0) $ args <|> [nick]
+        var :: Maybe (String, String, String)
+        var = do
+            let (varbegin, varcontent) = bisect (== '=') str
+                (vartype, varname) =
+                    let temp = bisect (== ' ') varbegin
+                    in take 20 . head . words <$> if null $ snd temp 
+                        then swap temp
+                        else temp
+            guard . not $ null varname || null varcontent
+            return (vartype, varname, varcontent)
+    case var of
+      Nothing -> do -- read var
+        liftIO $ putStrLn "Reading vars..."
+        svars <- liftIO $ lines <$> readFile varPath
+        let (isGlobal, varname) =
+                let temp = bisect (== ' ') str
+                    temp2 = if null $ snd temp then swap temp else temp
+                in (fst temp2 == "Global", snd temp2)
+            mvar :: Maybe String
+            mvar = listToMaybe $ do
+                v <- svars
+                let mvars = maybeRead v
+                guard $ mvars /= Nothing
+                let var = fromJust mvars
+                guard $ readableVar server dest nick' varname var
+                guard $ if isGlobal then isGlobalVar var else True
+                return $ varContents var
+        case mvar of
+            Just x -> return $ ChannelMsg x
+            Nothing -> return $ EmptyMsg
+      Just (vartype, varname, varcontent) -> do -- write var
+        liftIO $ putStrLn "Writing var..."
+        h <- liftIO $ openFile varPath ReadMode
+        svars <- liftIO $ lines <$> hGetContents h
+        let uvar = stringToVar vartype server dest nick' varname varcontent
+            isGlobal = fromJust $ (return . (== "Global") . head $ words str)
+                              <|> Just False
+            isRemove = fromJust $ (return . (== "Remove") . head $ words str)
+                              <|> Just False
+            mvar :: [String]
+            !mvar = do
+                v <- svars
+                let mvars = maybeRead v
+                guard $ mvars /= Nothing
+                let var = fromJust mvars
+                guard . not $ writableVar server dest nick' varname var
+                return $ show var
+            vars = if isRemove then mvar else show uvar : mvar
+        liftIO $ do
+            hClose h
+            writeFile varPath $ unlines vars
+        return EmptyMsg
 
--- Variable
--- YOU'RE WORKING ON THIS YOU だめ人間; FINISH THIS SHIT.
-variable :: [String] -> (String, String) -> Memory String
-variable [_] (varname, []) = do -- Read variable
-    meta <- asks getMeta
-    variablePath <- asks (variablePathC . getConfig)
-    e <- (liftIO . try $ do
-        h <- openFile variablePath ReadMode
-        !f <- hGetContents h
-        hClose h
-        return f) :: Memory (Either SomeException String)
-    case e of
-        Right file -> do
-            let nick = getUsernick meta
-                dest = getDestino meta
-                server = getServer meta
-                variables =
-                    let maybeVariables = fmap fst . listToMaybe . reads $ file
-                    in if maybeVariables /= Nothing
-                        then fromJust maybeVariables
-                        else []
-                dests = variables `tupleListGet` server
-                vars = dests `tupleListGet` dest
-                (_, nick', msg) = vars `tupleVarGet` varname
-            if msg /= EmptyVar
-                then if readableVar msg
-                    then return . fromVariable $ msg
-                    else if nick == nick'
-                        then return . fromVariable $ msg
-                        else return []
-                else return []
-        Left e -> liftIO (print e) >> return []
-variable args (varname, str) = do -- Set variable
-    meta <- asks getMeta
-    variablePath <- asks (variablePathC . getConfig)
-    e <- (liftIO . try $ do
-        h <- openFile variablePath ReadMode
-        !f <- hGetContents h
-        hClose h
-        return f) :: Memory (Either SomeException String)
-    case e of
-        Right contents -> do
-            let nick = getUsernick meta
-                dest = getDestino meta
-                server = getServer meta
-                variables = let maybeVariables = fmap fst . listToMaybe . reads $ contents
-                            in if maybeVariables /= Nothing
-                                then fromJust maybeVariables
-                                else []
-                dests = variables `tupleListGet` server
-                vars = dests `tupleListGet` dest
-                (_, nick', msg) = vars `tupleVarGet` varname
-
-                vartype = if length args > 1 then バカ (args !! 1) else Regular
-                var = vartype str
-
-                nicks' = vars `tupleVarInject` (varname, nick, var)
-                dests' = (dest, nicks') `tupleInject` dests
-                variables' = (server, dests') `tupleInject` variables :: Variables
-
-            if writeableVar msg
-                then do
-                    liftIO . putStrLn $ "It's writeable: " ++ show variables'
-                    writeVariables variables'
-                else if nick == nick'
-                    then do
-                        liftIO . putStrLn $ "Not writeable, but same user: " ++ show variables'
-                        writeVariables variables'
-                    else do
-                        liftIO $ putStrLn "Cannot overwrite variable."
-                        return []
-        Left e -> liftIO (print e) >> return []
-  where バカ ('p':'r':'i':_) = Personal
-        バカ ('i':'m':'m':_) = Immutable
-        バカ ('r':'e':'m':_) = Reminder
-        バカ _               = Regular
-        writeVariables :: Variables -> Memory String
-        writeVariables variables' = do
-            variablePath <- asks (variablePathC . getConfig)
-            writeStatus <- (liftIO . try $ do
-                h <- openFile variablePath WriteMode
-                hPutStrLn h $ show variables'
-                hClose h) :: Memory (Either SomeException ())
-            case writeStatus of
-                Right _ -> return []
-                Left e -> liftIO (print e) >> return []
-
-weather :: String -> Memory String
-weather str = do
-    xml <- liftIO $ curlGetString' ("http://www.google.com/ig/api?weather=" ++ urlEncode' str) []
+weather :: [String] -> String -> Memory (Message String)
+weather _ str = do
+    let burl = "http://www.google.com/ig/api?weather="
+    xml <- liftIO $ curlGetString' (burl ++ urlEncode' str) []
     let weatherElem = fromMaybeElement $ parseXMLDoc xml
-        city = getData . fromMaybeElement $ findElement (QName "city" Nothing Nothing) weatherElem
-        condition = map formatCondition . getConditionData $ findElements (QName "current_conditions" Nothing Nothing) weatherElem
-        forecasts = map formatForecast . getConditionData $ findElements (QName "forecast_conditions" Nothing Nothing) weatherElem
-    return . join "; " $ condition ++ forecasts
+        eCity = findElement (QName "city" Nothing Nothing) weatherElem
+        eCurrent = findElements (QName "current_conditions" Nothing Nothing) weatherElem
+        eForecast = findElements (QName "forecast_conditions" Nothing Nothing) weatherElem
+        city = getData . fromMaybeElement $ eCity
+        condition = map formatCondition . getConditionData $ eCurrent
+        forecasts = map formatForecast . getConditionData $ eForecast
+    return . ChannelMsg . join "; " $ condition ++ forecasts
   where getData element = fromMaybeString $ findAttr (QName "data" Nothing Nothing) element
         getConditionData elems = map (map getData . onlyElems . elContent) elems
         formatCondition [condition, tempF, tempC, humidity, _, wind] =
@@ -503,15 +542,29 @@ weather str = do
         formatForecast _ = []
 
 -- Wikipedia
--- Incomplete -- fix this
-wiki :: String -> Memory String
-wiki s = do
-    html <- liftIO $ curlGetString' ("https://en.wikipedia.org/w/index.php?search=%s&title=Special%3ASearch" % (replace "+" "%20" . urlEncode') s) []
-    let element = fromMaybeElement $ parseXMLDoc html
-        qname = QName "div" (Just "http://www.w3.org/1999/xhtml") Nothing
-        attrs = [Attr (QName "id" Nothing Nothing) "mw-content-text"]
-        element' = fromMaybeElement . listToMaybe $ findElementsAttrs element qname attrs
-        qname' = QName "p" (Just "http://www.w3.org/1999/xhtml") Nothing
-        element'' = fromMaybeElement $ findElement qname' element'
-        text = elemsText element''
-    return . (`cutoff` 400) $ text
+wiki :: [String] -> String -> Memory (Message String)
+wiki args s = do
+    let burl = "https://en.wikipedia.org/w/index.php?search=%s&title=Special%3ASearch"
+    html <- liftIO $ curlGetString' (burl % (replace "+" "%20" . urlEncode') s) []
+    let xml = fromMaybeElement $ parseXMLDoc html
+        qDiv = QName "div" (Just "http://www.w3.org/1999/xhtml") Nothing
+        qMwcontent = [Attr (QName "id" Nothing Nothing) "mw-content-text"]
+        element = fromMaybeElement $ findElementAttrs qDiv qMwcontent xml
+        qPar = QName "p" (Just "http://www.w3.org/1999/xhtml") Nothing
+        intro = findChild qPar element
+        qMwsearch = [Attr (QName "class" Nothing Nothing) "mw-search-createlink"]
+        search = findElementAttrs (QName "p" Nothing Nothing) qMwsearch element
+        text = strip $ elemsText . fromMaybeElement $ search <|> intro
+    if null text
+        then return EmptyMsg
+        else return . ChannelMsg . (`cutoff` 400) $ text
+
+-------------------------------------------------------------------------------
+-- Non-IRC bot functions / event functions ------------------------------------
+-------------------------------------------------------------------------------
+
+diff :: [String] -> Memory String
+diff xs = do
+    temp <- asks (getTemp . getMeta)
+    let xs' = filter (not . (`elem` temp)) xs
+    return $ joinUntil ", " xs' 400

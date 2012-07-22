@@ -24,8 +24,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 module Types where
 
 
+import Control.Concurrent (MVar)
 import Control.Monad.Reader
 import Data.String.Utils (replace)
+import qualified Data.Text as T
+import System.IO (Handle)
 
 
 class PyFormat s r where
@@ -40,24 +43,39 @@ instance PyFormat String (String, String) where
 instance PyFormat String String where
     (%) x y = replace "%s" y x
 
-type Variables = [(String, [(String, [(String, String, Variable String)])])]
+-- server, server, nick, name, contents
+data Variable = Immutable String String String String String
+              | Reminder String String String String String
+              | Personal String String String String String
+              | Normal String String String String String
+              | Global String String String
+              deriving (Show, Read, Eq)
 
-data Message = ChannelMsg String
-             | UserMsg String
-             | EmptyMsg
-             deriving (Eq, Show)
+data Message a = ChannelMsg a
+               | UserMsg a
+               | EmptyMsg
+               deriving (Eq, Show)
 
+instance Functor Message where
+    fmap f (ChannelMsg x) = ChannelMsg (f x)
+    fmap f (UserMsg x) = UserMsg (f x)
+    fmap f EmptyMsg = EmptyMsg
+
+-- For interpreting IRC messages
+data Funa = Add String Funa
+          | Pipe String Funa
+          | Bind String Funa
+          | App String Funa
+          | Plain String
+          | Void
+          deriving (Show, Read)
+
+-- For Config
 data Allowed a = Blacklist { getBlacklist :: a }
                | Whitelist { getWhitelist :: a }
                deriving (Show)
 
-data Variable a = Regular a
-                | Personal a
-                | Immutable a
-                | Reminder a
-                | EmptyVar
-                deriving (Show, Read, Eq)
-
+-- Configuration data for KawaiiBot
 data Config = Config { serversC :: [Server]
                      , eventsC :: [Event]
                      , lewdPathC :: FilePath
@@ -78,6 +96,7 @@ defaultConfig = Config { serversC = []
                        , verbosityC = 1
                        }
 
+-- Define a server for Config
 data Server = Server { serverPort :: Int
                      , serverURL :: String
                      , serverChans :: [String]
@@ -96,6 +115,7 @@ defaultServer = Server { serverPort = 6667
                        , allowedFuncs = []
                        }
 
+-- A timed event for Config
 data Event = Event { eventFunc :: Memory String
                    , eventRunTime :: IO Double
                    , eventTime :: Double
@@ -112,16 +132,24 @@ defaultEvent = Event { eventFunc = return ""
                      , eventTemp = []
                      }
 
+-- Message metadata
+data MsgFunc = MsgFunc { msgFunc :: String
+                       , msgArgs :: [String]
+                       , msgString :: String
+                       }
+
 data Meta = Meta { getDestino :: String
                  , getUsernick :: String
                  , getUsername :: String
                  , getHostname :: String
                  , getChannels :: [String]
                  , getServer :: String
-                 , getOwnNick :: String
+                 , getTemp :: [String]
                  } deriving (Show, Eq)
 
-data Funcs = Funcs { allowPrint :: Bool
+emptyMeta = Meta [] [] [] [] [] [] []
+
+data Funcs = Funcs { allowEcho :: Bool
                    , allowTitle :: Bool
                    , allowWeather :: Bool
                    , allowAnime :: Bool
@@ -138,9 +166,10 @@ data Funcs = Funcs { allowPrint :: Bool
                    , allowBind :: Bool
                    , allowPipe :: Bool
                    , allowAdd :: Bool
+                   , allowApp :: Bool
                    } deriving (Show)
 
-defaultFuncs = Funcs { allowPrint = True
+defaultFuncs = Funcs { allowEcho = True
                      , allowTitle = False
                      , allowWeather = True
                      , allowAnime = True
@@ -158,9 +187,28 @@ defaultFuncs = Funcs { allowPrint = True
                      , allowBind = False
                      , allowPipe = True
                      , allowAdd = True
+                     , allowApp = True
                      }
 
-emptyMeta = Meta [] [] [] [] [] [] []
 
+-- Client
 type Memory = ReaderT MetaConfig IO
 data MetaConfig = MetaConfig { getMeta :: Meta, getConfig :: Config }
+
+-- Core
+type CMemory = ReaderT MVarConfig IO
+data MVarConfig = MVarConfig { getcChannels :: [(String, [String])]
+                             , getcMVars :: MVars
+                             , getcConfig :: Config
+                             }
+
+data MVars = MVars { clientsMVar :: MVar [CClient]
+                   , textMVar :: MVar [CMessage]
+                   , serverMVar :: MVar [CServer]
+                   , timeMVar :: MVar [CTimestamp]
+                   }
+
+type CClient = (String, Handle)
+type CServer = (String, Handle)
+type CMessage = (String, T.Text)
+type CTimestamp = (String, Int)

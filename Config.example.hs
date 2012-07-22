@@ -21,6 +21,8 @@ import Bot
 storagePath = "/home/username/irc/"
 
 {- Available event functions are:
+    - channelMsg
+    - userMsg
     - anime
     - random
     - sed
@@ -33,36 +35,50 @@ storagePath = "/home/username/irc/"
     - title
     - weather
     - wiki
+    - isup
 
-See README.md for information about what arguments they take. Please note that 
-`optional' does not apply to the arguments these functions take. They must be 
-provided with everything listed, but `empty' is just an empty list, so if you 
-do not want to pass anything to it, just use `[]' (empty list).
+All functions take two arguments, one list of strings (the colon arguments) and
+a string. See `README.md' for information about the functions and what the
+strings should contain.
 
 Examples:
 
-Prints the defaults when using the anime function.
-    eventFunc = anime [] []
+Prints anime releases matching `yuru yuri':
+    eventFunc = plain (anime [] "yuru yuri")
 
-Prints 10 results received from searching for YuruYuri.
-    eventFunc = anime "YuruYuri" ["10"]
+Prints 2 anime releases matching `yuru yuri' added to a custom string:
+    eventFunc = add (channelMsg "These anime are fun:") (anime ["2"] "yuru yuri")
+Altternative:
+    eventFunc = return "These anime are fun:" `add` anime ["2"] "yuru yuri"
 
-It just prints a lewd string. Remember, lewd takes no arguments.
-    eventFunc = lewd
+Prints 20 anime recent anime releases and pipes it into the regex replace
+function that removes brackets and their contents:
+    eventFunc = pipe (anime ["20"] "") sed [] "s/\[.+\]//"
 
-This one pipes the weather into sed. It might not be so easy to understand to
-none Haskellers.
-    eventFunc = weather "Oslo, Norway" >>= (sed "/Today/Right now/ " ++)
+Helper functions:
+    - plain
+        Plain takes one argument
+            1. A function
+    - pipe
+        Pipe takes four arguments
+            1. A function
+            2. The name of a function
+            3. The list of strings (colon arguments)
+            4. The string to append 1's output to
+    - add
+        Add takes two arguments
+            1. A function
+            2. A function
+    - bind
+        Add takes two arguments
+            1. A function
+            2. A function
 
-We can write it in another way
-    eventFunc = do
-        we <- weather "Oslo, Norway"
-        sed ("/Today/Right now/ " ++ we)
 -}
 
                             -- event functions
                             -- print a random message from the log for this channel
-randomMsg = defaultEvent { eventFunc = random "1000" >>= lastMsg
+randomMsg = defaultEvent { eventFunc = pipe (random [] "1000") lastMsg [] ""
 
                             -- how frequently it will run (every hour here)
                          , eventRunTime = return 3600
@@ -74,7 +90,7 @@ randomMsg = defaultEvent { eventFunc = random "1000" >>= lastMsg
                          , eventServers = [eventRizon]
                          }
                             -- print airing anime
-animeAiring = defaultEvent { eventFunc = airing ["100"]
+animeAiring = defaultEvent { eventFunc = plain (airing ["10"] "")
                            , eventRunTime = return 3600
                            , eventChance = 1
                            , eventServers = [eventRizon]
@@ -83,7 +99,9 @@ animeAiring = defaultEvent { eventFunc = airing ["100"]
                             -- server for events
                             -- only server and channels are necessary
 eventRizon = defaultServer { serverURL = "irc.rizon.net"
-                           , serverChans = ["#KawaiiBot"]
+                            -- Note: blacklisting is not yet implemented,
+                            --       do not use it.
+                           , allowedChannels = Whitelist ["#KawaiiBot"]
                            }
 
 freenode = Server { serverURL = "irc.freenode.net"
@@ -105,7 +123,7 @@ rizon = Server { serverURL = "irc.rizon.net"
                                     -- Channels that KawaiiBot shouldn't join
                                     -- if invited.
                   , allowedChannels = Blacklist ["#malicious", "#channels"]
-                  , allowedFuncs = []
+                  , allowedFuncs = funcs
                   }
                     -- channel where the allowed functions apply to
   where funcs = [ ("#KawaiiBot",

@@ -4,7 +4,7 @@ KawaiiBot Haskell
 This is a Haskell rewrite of KawaiiBot.
 KawaiiBot is a lewd IRC bot that does useless things, such as checking the weather, grabbing information about anime and manga, and printing lewd messages.
 
-See `Config.hs.example` for options.
+See `Config.example.hs` for options.
 
 To install, run `cabal install`.
 To run KawaiiBot, execute `kawaiibot-core` and `kawaiibot-client`.
@@ -15,7 +15,7 @@ All functions need to be prefixed with `.` or `!`.
 
 * `.help`
 This function sends the general help string to the user who typed this.<br>
-It takes one optional argument, the name of a function.<br>
+It takes one optional argument, the name of a function or an operator.<br>
 Example: `.help ai`
 
 * `.>`
@@ -33,14 +33,23 @@ Gets the last message from the channel's log.<br>
 It takes one argument, an integer, starting at zero.<br>
 Example: `.^ 10`
 
+* `.$`
+Variable storing/fetching function.<br>
+It takes one optional colon argument, the user who should take ownership of the variable, and a string in the variable syntax.<br>
+Example: `.$:friend Reminder linux = Please remember to install a distribution of your choice!`<br>
+Example: `.$ linux`
+Example: `.$ Remove linux = I don't like this anymore`
+Where `Reminder` is optional and can be replaced with `Personal`, `Immutable` or `Normal`. The second example just prints the variable contents.<br>
+`Personal`: Only printable by the variable owner. `Reminder`: Same as personal, but may be printed when the variable owner joins the channel. `Immutable`: Can only be modified by the owner. `Normal`: Printable and modifiable by all. `Remove`: Deletes a variable.
+
 * `.sed`
 A regex replace function.<br>
 It takes two arguments, the regex matching and replacing string and a string.<br>
-Example: `.> I love bananas! -> .sed /banana/apple/`
+Example: `.> I love bananas! -> .sed s/banana/apple/`
 
 * `.ai`
 Prints currently airing anime.<br>
-It takes one optional colon argument, an integer and amount of anime to print.<br>
+It takes two optional arguments. The number of results to print and the anime to search for.<br>
 Example: `.ai:5`
 
 * `.an`
@@ -80,15 +89,20 @@ Example: `.isup haskell.org`
 
 ## Operators
 * `>>`
-Bind, it executes the function on the left but ignores the output, and continues parsing the right.<br>
+Bind, it executes the function on the left but ignores the output.<br>
+Example: `.lewd >> .ai`
 
 * `->`
-Pipe, it appends the output of the function on the left into the function on the right.
+Pipe, it appends the output of the function on the left into the function on the right.<br>
+Example: `.lewd -> .>`
+
+* `$$`
+Application operator, it appends the output of the function on the right into the function on the left. The opposite of `->`.<br>
+Example: `.we $$ .ra Tokyo|Oslo|Madrid`
 
 * `++`
-Add, it appends the string of the output on the right to the output on the left.
-
-Example usage: `.ra 100 -> .^ ++ .lewd`
+Add, it appends the string of the output on the right to the output on the left.<br>
+Example: `.lewd ++ .lewd`
 
 ## .lewd
 The format for the lewd function's file is currently looking something like this:

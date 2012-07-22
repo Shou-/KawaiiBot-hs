@@ -25,6 +25,7 @@ import Bot
 import Types
 import Utils
 
+import Control.Applicative
 import Control.Concurrent
 import Control.Exception
 import Control.Monad hiding (join)
@@ -64,6 +65,7 @@ event h = do
     currentTime <- liftIO $ fmap realToFrac getPOSIXTime
     events' <- forM events $ \event -> do
         let bool = currentTime >= eventTime event
+            temp = eventTemp event
         cbool <- liftIO $ chance (eventChance event)
         case () of
           _ | bool && cbool -> do
@@ -71,9 +73,12 @@ event h = do
                     servers = eventServers event
                     metas :: [Meta]
                     metas = concat . (`map` servers) $
-                                \(Server _ server channels _ _ _ _) ->
-                                    (`map` channels) $ \channel ->
-                                        Meta channel "Anon" "" "" [] server ""
+                        \(Server _ server _ _ _ channels _) ->
+                            case channels of
+                                Blacklist chans -> []
+                                Whitelist chans ->
+                                    (`map` chans) $ \chan ->
+                                        Meta chan "Anon" "" "" [] server temp
                 forM_ metas $ \meta -> do
                     text <- local (injectMeta meta) $ eventFunc event
                     unless (null text) $ do
@@ -114,7 +119,7 @@ parse h bs = do
         else local (injectMeta meta') $ parseMsg h (sArgs, sMsg)
   where parseMsg :: Handle -> ([String], String) -> Memory ()
         parseMsg h (args, msg)
-            | args !! 3 == "PRIVMSG" = do -- Interpret message and respond if anything's returned from `msgInterpret'
+            | isCmd args 3 "PRIVMSG" = do -- Interpret message and respond if anything's returned from `parser'
                 meta <- asks getMeta
                 let nick = args !! 0
                     name = args !! 1
@@ -123,9 +128,10 @@ parse h bs = do
                     dest = args !! 4
                     channels = getChannels meta
                     serverurl = getServer meta
-                    ownnick = getOwnNick meta
+                    temp = getTemp meta
 
-                    meta' = Meta dest nick name host channels serverurl ownnick
+                    meta' = Meta dest nick name host channels serverurl temp
+
                 local (injectMeta meta') $ do
                     meta <- asks getMeta
                     titleFetching <- getFunc allowTitle
@@ -134,10 +140,10 @@ parse h bs = do
                     when titleFetching . void . forkMe $ do -- URL fetching
                         let urls = filter (isPrefixOf "http") $ words msg
                         forM_ urls $ \url -> do
-                            title' <- title url
+                            title' <- fmap fromMsg $ title url
                             let message = "PRIVMSG " ++ dest ++ " :\ETX5Title\ETX: " ++ title'
                             unless (null title') $ write h message
-                    post <- msgInterpret msg
+                    post <- parser msg
                     let mAct = if isChannelMsg post
                             then "PRIVMSG " ++ dest
                             else "PRIVMSG " ++ nick
@@ -157,7 +163,7 @@ parse h bs = do
                                 when (verbosity > 0) $ print e
 
                     return ()
-            | args !! 3 == "INVITE" = do -- Join a channel on invite
+            | isCmd args 3 "INVITE" = do -- Join a channel on invite
                 meta <- asks getMeta
                 let nick = args !! 0
                     name = args !! 1
@@ -166,9 +172,9 @@ parse h bs = do
                     dest = args !! 4
                     channels = getChannels meta
                     serverurl = getServer meta
-                    ownnick = getOwnNick meta
+                    temp = getTemp meta
 
-                    meta' = Meta dest nick name host channels serverurl ownnick
+                    meta' = Meta dest nick name host channels serverurl temp
 
                 -- check this channel against a list of banned ones or something
                 allowedChans <- asks (fmap allowedChannels . (`findServer` serverurl) . serversC . getConfig)
@@ -185,36 +191,61 @@ parse h bs = do
                             write h $ "PRIVMSG " ++ dest ++ " :Your channel is not whitelisted."
                     Nothing -> return ()
                 return ()
-            | args !! 3 == "KICK" = do 
+            | isCmd args 3 "KICK" = do 
                 let dest = args !! 4
 
                 return ()
-            | args !! 3 == "PART" = do
+            | isCmd args 3 "PART" = do
                 let nick = args !! 0
                     dest = args !! 4
 
                 return ()
-            | args !! 3 == "JOIN" = do
+            | isCmd args 3 "JOIN" = do
+                meta <- asks getMeta
                 let nick = args !! 0
                     dest = msg
+                    serverurl = getServer meta
 
-                -- get :reminder variable for person joining
-                return ()
-            | args !! 3 == "QUIT" = do 
+                varPath <- asks (variablePathC . getConfig)
+                svars <- liftIO $ lines <$> readFile varPath
+                let mvar :: [Variable]
+                    mvar = do
+                        v <- svars
+                        let mvars = maybeRead v
+                        guard $ mvars /= Nothing
+                        let var = fromJust mvars
+                        guard $ readableReminder serverurl dest nick var
+                        return var
+                case length mvar of
+                  0 -> return ()
+                  1 -> write h $ unwords [ "PRIVMSG"
+                                         , dest
+                                         , ':' : nick ++ ":"
+                                         , varContents $ head mvar
+                                         ]
+                  _ ->
+                    write h $ unwords [ "PRIVMSG"
+                                      , dest
+                                      , ':' : nick ++ ":"
+                                      , "You have " ++ show (length mvar)
+                                      , "reminders:"
+                                      , unwords $ map varName mvar
+                                      ]
+            | isCmd args 3 "QUIT" = do 
                 let nick = args !! 0
 
                 return ()
-            | args !! 3 == "NICK" = do 
+            | isCmd args 3 "NICK" = do 
                 let nick = args !! 0
 
                 return ()
-            | args !! 3 == "MODE" = do 
+            | isCmd args 3 "MODE" = do 
                 let nick = args !! 0
                     dest = args !! 4
                     mode = args !! 5
 
                 return ()
-            | args !! 1 == "353" = do -- Receive nick list
+            | isCmd args 1 "353" = do -- Receive nick list
                 let dest = args !! 4 -- use this stuff to handle userlists later
                     --f = \_ -> map (\x'@(x:xs) -> if x `elem` ['~', '&', '@', '%', '+'] then (x, xs) else (' ', x')) $ split " " msg
                     --meta' = f `modUserlist` meta -- meta doesn't hold userlists anymore
@@ -223,6 +254,8 @@ parse h bs = do
             | otherwise = do -- Fallback
                 return ()
         coreArgs = ["getservers", "getnick", "serverjoin", "serverquit"]
+        isCmd args n x | length args >= 3 = args !! 3 == x
+                       | otherwise = False
 
 -- Connects to an IRC server
 serverConnect :: Memory ()

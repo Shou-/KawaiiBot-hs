@@ -19,11 +19,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 {-
 TODO:
 -- Clean up this file, sort functions and such by category.
----- Move types, classes, instances, etc to its own module, `Types.hs'.
 -}
 
-{-# LANGUAGE DoAndIfThenElse
-           #-}
+{-# LANGUAGE DoAndIfThenElse #-}
 
 module Utils where
 
@@ -31,6 +29,7 @@ module Utils where
 import Types
 
 import Codec.Binary.UTF8.String (encodeString, decodeString)
+import Control.Applicative
 import Control.Concurrent
 import Control.Exception
 import qualified Control.Monad as M
@@ -44,9 +43,12 @@ import Network.Curl
 import Text.XML.Light
 
 
-botversion = "KawaiiBot 0.1.1"
+botversion = "KawaiiBot 0.1.5"
 
--- Message utilities
+-------------------------------------------------------------------------------
+-- Message utilities ----------------------------------------------------------
+-------------------------------------------------------------------------------
+
 fromMsg (ChannelMsg x) = x
 fromMsg (UserMsg x) = x
 fromMsg EmptyMsg = []
@@ -57,13 +59,21 @@ msgType _ = ChannelMsg
 isChannelMsg (ChannelMsg _) = True
 isChannelMsg _ = False
 
--- Server utils
-getByServerURL :: [Server] -> String -> Maybe Server
-getByServerURL xs s = foldr f Nothing xs
+mergeMsg :: Message String -> Message String -> Message String
+mergeMsg (UserMsg a) b = fmap ((a ++) . (" " ++)) b
+mergeMsg (ChannelMsg a) b = fmap ((a ++) . (" " ++)) b
+mergeMsg EmptyMsg b = b
+
+-------------------------------------------------------------------------------
+-- Server utils ---------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+getByServerURL :: String -> [Server] -> Maybe Server
+getByServerURL s xs = foldr f Nothing xs
   where f = (\x acc -> if serverURL x == s then Just x else acc)
 
-allowFuncThen :: (Funcs -> Bool) -> Memory Message -> Memory Message
-allowFuncThen f m = do
+allowThen :: (Funcs -> Bool) -> Memory (Message String) -> Memory (Message String)
+allowThen f m = do
     func <- getFunc f
     if func
         then m
@@ -95,15 +105,6 @@ insEq a b = let (bool, v) = foldl f (True, a) b
             then (b, ys)
             else (False, [])
 
-cutoff :: String -> Int -> String
-cutoff s n = if length s > n then (take n s) ++ "…" else s
-
-joinUntil :: String -> [String] -> Int -> String
-joinUntil str strs n =
-    let str' = snd $ foldl (\(status, acc) x -> let acc' = acc ++ x ++ str
-                                                in if status && length acc' <= n then (True, acc') else (False, acc)) (True, "") strs
-    in take (length str' - length str) str'
-
 isNum :: String -> Bool
 isNum [] = False
 isNum str = foldr (\x acc -> if x `elem` ['0' .. '9'] then acc else False) True str
@@ -122,17 +123,18 @@ tupleInject var@(name, _) vars =
     let (status, list) = foldr (\var'@(name', _) (status', acc) -> if name == name' then (True, var : acc) else (status', var' : acc)) (False, []) vars
     in if status then list else var : list
 
-tupleVarInject :: [(String, String, Variable a)] -> (String, String, Variable a) -> [(String, String, Variable a)]
-tupleVarInject vars var@(name, _, _) =
-    let (status, list) = foldr (\var'@(name', _, _) (status', acc) -> if name == name' then (True, var : acc) else (status', var' : acc)) (False, []) vars
-    in if status then list else var : list
+-------------------------------------------------------------------------------
+-- String utils ---------------------------------------------------------------
+-------------------------------------------------------------------------------
 
+-- split a String several times with the Char list
 splits :: [Char] -> String -> [String]
 splits (x:xs) y = split [x] $ replaces xs [x] y
   where replaces (x':xs') y' s = replace [x'] y' (replaces xs' y' s)
         replaces [] _ s     = s
 splits [] _ = []
 
+-- strip that removes unnecessary infix whitespace
 istrip :: String -> String
 istrip (x:xs) | x /= ' '  = x : istrip' xs
               | otherwise = istrip' $ dropWhile (== ' ') xs
@@ -160,15 +162,110 @@ removePrefixes (x:xs) str =
         then str'
         else removePrefixes xs str
 
+sepFilter :: String -> (String, [String]) -> (String, [String])
+sepFilter x (stracc, filacc) = if negateWord x
+    then (stracc, tail x : filacc)
+    else (' ' : x ++ stracc, filacc)
+  where negateWord :: String -> Bool
+        negateWord ('-':_) = True
+        negateWord _       = False
+
 unlines' :: [String] -> String
 unlines' (x:[]) = x
 unlines' xs     = unlines xs
 
-bisectAt :: Eq a => a -> [a] -> ([a], [a])
-bisectAt s x = let fst' = takeWhile (not . (== s)) x
-                   snd' = dropWhile (not . (== s)) x
-                   snd'' = if null snd' then snd' else tail snd'
-                in (fst', snd'')
+-- Take until Int then add an ellipsis
+cutoff :: String -> Int -> String
+cutoff s n = if length s > n then (take n s) ++ "…" else s
+
+-- Join until length String >= Int
+joinUntil :: String -> [String] -> Int -> String
+joinUntil str strs n =
+    let str' = snd $ foldl (\(status, acc) x ->
+            let acc' = acc ++ x ++ str
+            in if status && length acc' <= n
+                    then (True, acc')
+                    else (False, acc)) (True, "") strs
+    in take (length str' - length str) str'
+
+-------------------------------------------------------------------------------
+-- List Utils -----------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+-- break, except the break match goes into fst of the tuple instead
+breakLate :: (a -> Bool) -> [a] -> ([a],  [a])
+breakLate f xs =
+    let g t@(_,[]) = t
+        g (x,(y:ys)) = (x ++ [y], ys)
+    in g $ break f xs
+
+-- break without preserving the matching `a'
+bisect :: (a -> Bool) -> [a] -> ([a], [a])
+bisect f xs = fmap (drop 1) $ break f xs
+
+-------------------------------------------------------------------------------
+-- Variable Utils -------------------------------------------------------------
+-------------------------------------------------------------------------------
+
+-- Server, Channel, Nick, Varname, Variable
+readableVar :: String -> String -> String -> String -> Variable -> Bool
+readableVar  se ch ni na (Personal se' ch' ni' na' _) =
+    se == se' && ch == ch' && ni == ni' && na == na'
+readableVar  se ch ni na (Reminder se' ch' ni' na' _) =
+    se == se' && ch == ch' && ni == ni' && na == na'
+readableVar se ch _ na (Immutable se' ch' _ na' _) =
+    se == se' && ch == ch' && na == na'
+readableVar se ch _ na (Normal se' ch' _ na' _) =
+    se == se' && ch == ch' && na == na'
+readableVar _ _ _ _ _ = False
+
+isGlobalVar :: Variable -> Bool
+isGlobalVar (Global _ _ _) = True
+isGlobalVar _ = False
+
+readableReminder :: String -> String -> String -> Variable -> Bool
+readableReminder se ch ni (Reminder se' ch' ni' _ _) =
+    se == se' && ch == ch' && ni == ni'
+readableReminder _ _ _ _ = False
+
+writableVar :: String -> String -> String -> String -> Variable -> Bool
+writableVar se ch ni na (Personal se' ch' ni' na' _) =
+    se == se' && ch == ch' && ni == ni' && na == na'
+writableVar se ch ni na (Reminder se' ch' ni' na' _) =
+    se == se' && ch == ch' && ni == ni' && na == na'
+writableVar se ch ni na (Immutable se' ch' ni' na' _) =
+    se == se' && ch == ch' && ni == ni' && na == na'
+writableVar se ch _ na (Normal se' ch' _ na' _) =
+    se == se' && ch == ch' && na == na'
+writableVar _ _ _ _ _ = False
+
+varContents :: Variable -> String
+varContents (Personal _ _ _ _ c) = c
+varContents (Reminder _ _ _ _ c) = c
+varContents (Immutable _ _ _ _ c) = c
+varContents (Normal _ _ _ _ c) = c
+varContents (Global _ _ c) = c
+
+varName :: Variable -> String
+varName (Personal _ _ _ na _) = na
+varName (Reminder _ _ _ na _) = na
+varName (Immutable _ _ _ na _) = na
+varName (Normal _ _ _ na _) = na
+varName (Global _ na _) = na
+
+stringToVar :: String -- Variable constructor function
+             -> String -- Server
+             -> String -- Channel
+             -> String -- Nick
+             -> String -- Variable name
+             -> String -- Variable content
+             -> Variable
+stringToVar f se ch ni na co
+    | f `insEq` "Immutable" = Immutable se ch ni na co
+    | f `insEq` "Reminder" = Reminder se ch ni na co
+    | f `insEq` "Personal" = Personal se ch ni na co
+    | f `insEq` "Global" = Global ni na co
+    | otherwise = Normal se ch ni na co
 
 curlGetString' :: FilePath -> [CurlOption] -> IO String
 curlGetString' url opt =
@@ -196,8 +293,12 @@ forkMe m = do
     r <- ask
     liftIO . forkIO $ runReaderT m r
 
-findElementsAttrs :: Element -> QName -> [Attr] -> [Element]
-findElementsAttrs element name attrs = filterElements match element
+-------------------------------------------------------------------------------
+-- Text.XML.Light.Utils -------------------------------------------------------
+-------------------------------------------------------------------------------
+
+findElementsAttrs :: QName -> [Attr] -> Element -> [Element]
+findElementsAttrs name attrs element = filterElements match element
   where match :: Element -> Bool
         match (Element name' attrs' _ _) =
             if qName name == qName name' || null (qName name) then
@@ -205,12 +306,24 @@ findElementsAttrs element name attrs = filterElements match element
                     then True
                     else False
             else False
-        compare_ :: Eq a => [a] -> [a] -> Bool
-        compare_ x y = and $ map fst $ foldr (\x'' acc -> if x'' `elem` y then (True, x'') : acc else (False, x'') : acc) [] x
+        compare_ x y =
+            let f x' acc | x' `elem` y = (True, x') : acc
+                         | otherwise = (False, x') : acc
+            in and $ map fst $ foldr f [] x
+
+findElementAttrs :: QName -> [Attr] -> Element -> Maybe Element
+findElementAttrs name attrs element =
+    listToMaybe $ findElementsAttrs name attrs element
+
+findElementsIn :: QName -> Element -> [Element]
+findElementsIn q e =
+    let elems = (contentsToEls . elContent) e
+    in M.join $ map (findElements q) elems
 
 -- TODO:
 ---- Convert Elem to Text and concat it into one single Elem with loads of Text
 ---- then run strContent' over it.
+------ Is this still relevant? ヽ(゜∀゜)ノ
 elemsText :: Element -> String
 elemsText e =
     let name = elName e
@@ -249,11 +362,31 @@ strContents (Element _ _ content _) =
         isText _ = False
 
 elemText :: [Text.XML.Light.Content] -> String
-elemText content' = foldr (\x acc -> if isElemText x then acc ++ (cdData . fromText $ x) else acc) "" content'
+elemText content' = foldr (\x acc -> if isElemText x
+                                        then acc ++ (cdData . fromText $ x)
+                                        else acc) "" content'
 
 fromMaybeElement :: Maybe Element -> Element
 fromMaybeElement (Just a)   = a
 fromMaybeElement Nothing    = Element (QName "" Nothing Nothing) [] [] Nothing
+
+fromText :: Text.XML.Light.Content -> CData
+fromText (Text a) = a
+fromText _        = error "Not `Text'"
+
+contentsToEls :: [Text.XML.Light.Content] -> [Element]
+contentsToEls xs =
+    let f (Elem x) acc = x : acc
+        f _ acc = acc
+    in foldr f [] xs
+
+isElemText :: Text.XML.Light.Content -> Bool
+isElemText (Text _) = True
+isElemText _        = False
+
+-------------------------------------------------------------------------------
+-- Maybe utils ----------------------------------------------------------------
+-------------------------------------------------------------------------------
 
 fromMaybeString :: Maybe String -> String
 fromMaybeString (Just a) = a
@@ -263,17 +396,9 @@ safeFromMaybe :: a -> Maybe a -> a
 safeFromMaybe _ (Just a) = a
 safeFromMaybe a Nothing = a
 
-isElemText :: Text.XML.Light.Content -> Bool
-isElemText (Text _) = True
-isElemText _        = False
-
 isNothing :: Maybe a -> Bool
 isNothing Nothing = True
 isNothing _       = False
-
-fromText :: Text.XML.Light.Content -> CData
-fromText (Text a) = a
-fromText _        = error "Not ``Text''"
 
 urlEncode' :: String -> String
 urlEncode' = urlEncode . encodeString
@@ -282,24 +407,10 @@ urlDecode' :: String -> String
 urlDecode' = decodeString . urlDecode
 
 safeRead :: Read a => String -> a -> a
-safeRead x y = let maybeS = fmap fst . listToMaybe . reads $ x
-               in if isNothing maybeS then y else fromJust maybeS
+safeRead x y = fromJust $ maybeRead x <|> Just y
 
-{-getDestinoMeta :: Server -> String -> Meta
-getDestinoMeta server str = foldr (\meta acc -> if getDestino meta == str then meta else acc) emptyMessage $ getMetas server
-  where emptyMessage = Meta [] [] [] [] [] (getChans server) (getServer server) (getNick server) []
-
--- Adds, or replaces if a Meta with the same Dest exists, Meta to a Server
-injectMeta :: Server -> Meta -> Server
-injectMeta (Server serverurl port nick nspw chans metas) meta =
-    let dest = getDestino meta
-        (status, metas') = foldr (\x (status', acc) -> if getDestino x == dest then (True, meta : acc) else (status', x : acc)) (False, []) metas
-        metas'' = if status then metas' else meta : metas'
-    in Server serverurl port nick nspw chans metas''-}
-
-{--- Apply function `f' to all Metas' userlists in the Server
-modUserlists :: ([(Char, String)] -> [(Char, String)]) -> Server -> Server
-modUserlists f (Server serverurl port nick nspw chans metas) = let metas' = map (modUserlist f) metas in Server serverurl port nick nspw chans metas'-}
+maybeRead :: Read a => String -> Maybe a
+maybeRead = fmap fst . listToMaybe . reads
 
 injectServ :: String -> Meta -> Meta
 injectServ str (Meta d n u h c _ o) = Meta d n u h c str o
@@ -313,28 +424,36 @@ findServer (server@(Server _ url _ _ _ _ _):xs) s = if s == url
 injectEvents events (Config s1 _ f1 f2 f3 s2 b2 i) =
     Config s1 events f1 f2 f3 s2 b2 i
 
+injectTemp temp (Event f r ti c s _) = Event f r ti c s temp
+
 injectMeta :: Meta -> MetaConfig -> MetaConfig
 injectMeta meta (MetaConfig _ config) = MetaConfig meta config
 
 modConfig f (MetaConfig meta config) = MetaConfig meta $ f config
 
-tupleVarGet :: [(String, String, Variable String)] -> String -> (String, String, Variable String)
-tupleVarGet l s = foldr (\(x, y, z) acc -> if x == s then (x, y, z) else acc) ("", "", EmptyVar) l
+-------------------------------------------------------------------------------
+-- Config.hs helper functions -------------------------------------------------
+-------------------------------------------------------------------------------
 
-readableVar :: Variable a -> Bool
-readableVar (Regular _)     = True
-readableVar (Immutable _)   = True
-readableVar _               = False
+add :: Memory (Message String) -> Memory (Message String) -> Memory String
+add x y = do
+    x' <- fmap fromMsg x
+    y' <- fmap fromMsg y
+    return $ x' ++ " " ++ y'
 
-writeableVar :: Variable a -> Bool
-writeableVar (Regular _) = True
-writeableVar (EmptyVar)  = True
-writeableVar _           = False
+bind :: Memory (Message String) -> Memory (Message String) -> Memory String
+bind x y = do
+    void x
+    fmap fromMsg y
 
-fromVariable :: Variable a -> a
-fromVariable (Regular a) = a
-fromVariable (Personal a) = a
-fromVariable (Immutable a) = a
-fromVariable (Reminder a) = a
-fromVariable (EmptyVar) = error "Cannot extract anything from empty variable."
+pipe :: Memory (Message String)
+     -> ([String] -> String -> Memory (Message String))
+     -> [String]
+     -> String
+     -> Memory String
+pipe f g x y = do
+    f' <- fmap fromMsg f
+    fmap fromMsg . g x $ unwords [y, f']
 
+plain :: Memory (Message [a]) -> Memory [a]
+plain x = fmap fromMsg x
