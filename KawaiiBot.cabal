@@ -1,8 +1,8 @@
 name:               KawaiiBot
-version:            0.1.4
+version:            0.1.5
 Synopsis:           The lewd IRC bot that does useless things.
 Author:             Shou
-Maintainer:         gnusokyo@gmail.com
+Maintainer:         shou@gnusokyo
 Copyright:          Shou
 License:            GPL-2
 License-File:       LICENSE
@@ -28,7 +28,7 @@ Executable kawaiibot-client
         utf8-string,
         xml
     Main-Is:
-        Main.hs
+        Client.hs
 
 Executable kawaiibot-core
     GHC-Options:
@@ -39,3 +39,10 @@ Executable kawaiibot-core
         directory
     Main-Is:
         Core.hs
+
+Library
+    Exposed-Modules:
+        KawaiiBot.Bot
+        KawaiiBot.IRC
+        KawaiiBot.Types
+        KawaiiBot.Utils

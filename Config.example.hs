@@ -9,13 +9,13 @@ https://github.com/Shou-/KawaiiBot-hs
 
 -}
 
-module Config (config) where
+module KawaiiBot.Config (config) where
 
 -- this imports the Types needed
-import Types
-import Utils
+import KawaiiBot.Types
+import KawaiiBot.Utils
 -- this imports event functions.
-import Bot
+import KawaiiBot.Bot
 
 -- this directory must exist
 storagePath = "/home/username/irc/"

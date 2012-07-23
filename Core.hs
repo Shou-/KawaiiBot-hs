@@ -21,9 +21,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 module Main where
 
 
-import Utils
-import Types
 import Config
+
+import KawaiiBot.Utils
+import KawaiiBot.Types
 
 import Control.Applicative
 import Control.Exception
