@@ -16,11 +16,6 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -}
 
-{-
-TODO:
--- Clean up this file, sort functions and such by category.
--}
-
 {-# LANGUAGE DoAndIfThenElse #-}
 {-# OPTIONS_HADDOCK prune #-}
 
@@ -44,7 +39,7 @@ import Network.Curl
 import Text.XML.Light
 
 
-botversion = "KawaiiBot 0.1.5"
+botversion = "KawaiiBot 0.1.6"
 
 -------------------------------------------------------------------------------
 -- ** Message utils
@@ -156,6 +151,13 @@ sepFilter x (stracc, filacc) = if negateWord x
         negateWord ('-':_) = True
         negateWord _       = False
 
+sepFilterText :: T.Text -> ([T.Text], [T.Text]) -> ([T.Text], [T.Text])
+sepFilterText x (stracc, filacc) = if negateWord x
+    then (stracc, T.tail x : filacc)
+    else (x : stracc, filacc)
+  where negateWord :: T.Text -> Bool
+        negateWord = T.isPrefixOf (T.pack "-")
+
 unlines' :: [String] -> String
 unlines' (x:[]) = x
 unlines' xs     = unlines xs
@@ -197,13 +199,13 @@ bisect f xs = fmap (drop 1) $ break f xs
 -- | Is the `Variable' readable by the user?
 readableVar :: String -> String -> String -> String -> Variable -> Bool
 readableVar  se ch ni na (Personal se' ch' ni' na' _) =
-    se == se' && ch == ch' && ni == ni' && na == na'
+    se == se' && ch `insEq` ch' && ni `insEq` ni' && na == na'
 readableVar  se ch ni na (Reminder se' ch' ni' na' _) =
-    se == se' && ch == ch' && ni == ni' && na == na'
+    se == se' && ch `insEq` ch' && ni `insEq` ni' && na == na'
 readableVar se ch _ na (Immutable se' ch' _ na' _) =
-    se == se' && ch == ch' && na == na'
+    se == se' && ch `insEq` ch' && na == na'
 readableVar se ch _ na (Normal se' ch' _ na' _) =
-    se == se' && ch == ch' && na == na'
+    se == se' && ch `insEq` ch' && na == na'
 readableVar _ _ _ _ _ = False
 
 -- | Is the Variable `Global'?
@@ -220,13 +222,13 @@ readableReminder _ _ _ _ = False
 -- | Is the Variable writable by the user?
 writableVar :: String -> String -> String -> String -> Variable -> Bool
 writableVar se ch ni na (Personal se' ch' ni' na' _) =
-    se == se' && ch == ch' && ni == ni' && na == na'
+    se == se' && ch `insEq` ch' && ni `insEq` ni' && na == na'
 writableVar se ch ni na (Reminder se' ch' ni' na' _) =
-    se == se' && ch == ch' && ni == ni' && na == na'
+    se == se' && ch `insEq` ch' && ni `insEq` ni' && na == na'
 writableVar se ch ni na (Immutable se' ch' ni' na' _) =
-    se == se' && ch == ch' && ni == ni' && na == na'
+    se == se' && ch `insEq` ch' && ni `insEq` ni' && na == na'
 writableVar se ch _ na (Normal se' ch' _ na' _) =
-    se == se' && ch == ch' && na == na'
+    se == se' && ch `insEq` ch' && na == na'
 writableVar _ _ _ _ _ = False
 
 -- | Variable content data

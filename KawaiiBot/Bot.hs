@@ -35,8 +35,11 @@ import Control.Monad.Reader hiding (join)
 import Data.Char
 import Data.List
 import Data.Foldable (foldr')
+import Data.Graph.Inductive.Query.Monad (mapFst, mapSnd)
 import Data.Maybe (fromJust, listToMaybe)
 import Data.String.Utils
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
 import Data.Tuple
 import Network.Curl
 import System.IO
@@ -55,7 +58,7 @@ import Debug.Trace
 -- @
 parser :: String
        -> Memory (Message String)
-parser x = interpret . toFuna $ words x
+parser x = interpret . toFuna $ split " " x
 
 -- | Words to Funa data
 toFuna :: [String] -> Funa
@@ -88,13 +91,17 @@ interpret (Bind s f) = allowThen allowBind $ interpret f
 interpret (Pipe s f) = allowThen allowPipe $ run s >>= interpret . deepPipe f
 interpret (App s f) = allowThen allowApp $ do
     ex <- fmap fromMsg $ interpret f
-    run $ s ++ " " ++ ex
+    run $ s ++ ex
 
 -- | Run an IRC bot function and return the string.
+--
+-- @
+-- run \".> I like bananas.\"
+-- @
 run :: String -> Memory (Message String)
 run x =
     let (fcmd, fstring) = break (not . (/= ' ')) x
-        (cmd : args) = split ":" fcmd
+        (cmd : args) = split ":" fcmd <|> ["", ""]
         string = dropWhile (== ' ') fstring
     in case () of
       _ | cmd `isCmd` ">" -> -- Public message
@@ -105,7 +112,7 @@ run x =
                 echo UserMsg args string
         | cmd `isCmd` "^" -> -- Last message / message history
             allowThen allowHistory $
-                lastMsg args string
+                findMsg args string
         | cmd `isCmd` "$" -> -- Variable storing / fetching
             allowThen allowVariable $
                 variable2 args string
@@ -122,7 +129,7 @@ run x =
                 isup args string
         | cmd `isCmd` "lewd" -> -- Lewd message
             allowThen allowLewd $
-                lewd args string
+                lewd2 args string
         | cmd `isCmd` "ma" -> -- Recent manga releases
             allowThen allowManga $
                 manga args string
@@ -159,8 +166,8 @@ deepPipe (Pipe s f) m = Pipe (unwords [s, fromMsg m]) f
 deepPipe (App s f) m = App (unwords [s, fromMsg m]) f
 
 echo :: (String -> Message String)
-     -> [String] 
-     -> String 
+     -> [String]
+     -> String
      -> Memory (Message String)
 echo f _ s = return (f s)
 
@@ -170,6 +177,9 @@ channelMsg = echo ChannelMsg
 userMsg = echo UserMsg
 
 -- | Regex replace function.
+--
+-- > .sed s\/banana\/apple\/
+--
 sed2 :: [String] -> String -> Memory (Message String)
 sed2 _ ('s':x:xs) = do
     let f :: (Bool, (Int, ((String, String), String))) 
@@ -202,7 +212,7 @@ sed2 _ _ = return EmptyMsg
 sed3 :: String -> Memory (Message String)
 sed3 _ = return EmptyMsg
 
--- | Low level anime function, instead returning a list of strings.
+-- | Low level anime releases function, instead returning a list of strings.
 anime' :: [String] -> String -> Memory [String]
 anime' args str = do
     let (str', filters) = foldr' sepFilter ("", []) $ words str
@@ -220,11 +230,11 @@ anime' args str = do
         putStrLn $ "Filters: %(f); str': %(s)" % [("f", join ", " filters), ("s", str')]
     return $ take amount animes'
 
--- | Styled anime releases function.
+-- | Anime releases function.
 anime :: [String] -> String -> Memory (Message String)
 anime args str = do
     animes <- anime' args str
-    let animes' = map (replace "[" "[\ETX13" . replace "]" "\ETX]") animes
+    let animes' = map (replace "[" "[\ETX12" . replace "]" "\ETX]") animes
     return . ChannelMsg $ joinUntil ", " animes' 400
 
 -- | Low level airing anime function, instead returning a list of Strings.
@@ -246,16 +256,16 @@ airing2 args str = do
         tds :: [[String]]
         tds = fmap (fmap elemsText . contentsToEls . elContent) trs
         f (_ : series : season : station : company : time : eta : xs) acc =
-            let seri = "\ETX10" ++ series ++ "\ETX"
-                tim' = "\ETX4" ++ time ++ "\ETX"
+            let seri = "\ETX12" ++ series ++ "\ETX"
+                tim' = "\ETX08" ++ time ++ "\ETX"
                 eta' = "(" ++ istrip eta ++ ")"
                 nonSearch = unwords [seri, tim', eta']
-                proSearch = unwords [ "\ETX5Series\ETX:", series
-                                    , "\ETX5Season\ETX:", season
-                                    , "\ETX5Time\ETX:", time
-                                    , "\ETX5ETA\ETX:", istrip eta
-                                    , "\ETX5Station\ETX:", station
-                                    , "\ETX5Company\ETX:", company
+                proSearch = unwords [ "\ETX12Series\ETX:", series
+                                    , "\ETX12Season\ETX:", season
+                                    , "\ETX12Time\ETX:", time
+                                    , "\ETX12ETA\ETX:", istrip eta
+                                    , "\ETX12Station\ETX:", station
+                                    , "\ETX12Company\ETX:", company
                                     ]
             in if isSearch then
                 let search = map (`isInfixOf` map toLower series)
@@ -302,49 +312,73 @@ help _ str = do
             | s == "wiki"       = "Prints the introduction to an article. Ex: .wiki haskell programming language."
             | otherwise         = "Try `.help' and a value. Functions: >, <, ^, $, sed, ai, an, ma, ra, tr, we. Operators: bind, pipe, add, app. More: http://github.com/Shou-/KawaiiBot-hs#readme"
 
--- Read str as Int, or 0 if not number. Use it as an index for the history list.
--- Fallback to `[]'.
--- | Fetch a message from the channel history.
-lastMsg :: [String] -> String -> Memory (Message String)
-lastMsg _ str = do
+-- TODO: Use Text instead.
+-- | Find the nth matching message from the channel chatlog. Where n is the
+-- first colon argument, and a number.
+--
+-- If there is no searching string, match against everything, returning the
+-- nth message from the whole chatlog.
+findMsg :: [String] -> String -> Memory (Message String)
+findMsg args str = do
     meta <- asks getMeta
     logsPath <- asks (logsPathC . getConfig)
-    let serverurl = getServer meta
-        dest = getDestino meta
-    e <- liftIO . try $ (do
-        let path = logsPath ++ serverurl ++ " " ++ dest
-        fmap (map (\x -> read x :: ([String], String)) . reverse . lines) $ readFile path) :: Memory (Either SomeException [([String], String)])
-    case e of
-        Right history -> do
-            let len = length history
-                n = if isNum . strip $ str then read str else 0 :: Int
-                n' = if n >= 0 then n else 0
-            if len > n'
-                then return . ChannelMsg . snd $ history !! n'
-                else return EmptyMsg
-        Left e -> do
-            verbosity <- asks (verbosityC . getConfig)
-            liftIO . when (verbosity > 1) $ print e
-            return EmptyMsg
+    let path = logsPath ++ getServer meta ++ " " ++ getDestino meta
+        (strs, filters) = foldr' sepFilterText ([], []) . T.words $ T.pack str
+        searchF x = and $ map (`T.isInfixOf` snd x) strs
+        filterF x = not . or $ map (`T.isInfixOf` snd x) filters
+    r <- fmap (reverse . T.lines) . liftIO $ T.readFile path
+    let history :: [([T.Text], T.Text)]
+        history = do
+            x <- r
+            let msg = maybeRead (T.unpack x) :: Maybe ([T.Text], T.Text)
+            guard $ msg /= Nothing
+            guard $ if not $ null strs then searchF $ fromJust msg else True
+            guard $ if not $ null filters then filterF $ fromJust msg else True
+            return $ fromJust msg
+        msg :: Message String
+        msg = do
+            let arg = fromJust $ listToMaybe args <|> Just "0"
+                n = safeRead arg 0
+            if length history > n
+                then return . T.unpack . snd $ history !! n
+                else EmptyMsg
+    return msg
 
 -- | Output lewd strings.
-lewd :: [String] -> String -> Memory (Message String)
-lewd _ _ = do
+lewd2 :: [String] -> String -> Memory (Message String)
+lewd2 _ _ = do
     meta <- asks getMeta
     lewdPath <- asks (lewdPathC . getConfig)
-    file <- liftIO $ readFile lewdPath
-    randomadj1 <- liftIO $ randomRIO (0, pred $ length adj1s)
-    let obj = [("nick", getUsernick meta), ("adj1", adj1s !! randomadj1)]
-        lewds = map (\x -> read x % obj) . lines $ file
-    randomlewd <- liftIO $ randomRIO (0, pred $ length lewds)
-    return . UserMsg $ lewds !! randomlewd
-  where adj1s = [ "hard"
-                , "wet"
-                , "delicious"
-                , "pink"
-                , "sticky"
-                , "slippery"
-                ]
+    lewds <- liftIO . fmap lines $ readFile lewdPath
+    let parse :: [String] -> [(String, [String])]
+        parse [] = []
+        parse ([]:xs) = parse xs
+        parse (x:xs) =
+            let title = takeWhile (/= ':') x
+                (start, rest) = inparse xs
+            in (title, start) : parse rest
+          where inparse :: [String] -> ([String], [String])
+                inparse [] = ([], [])
+                inparse ([]:xs) = inparse xs
+                inparse ((' ':ys):xs) =
+                    let x = dropWhile (== ' ') ys
+                    in if null x
+                        then inparse xs
+                        else mapFst ([x] ++) $ inparse xs
+                inparse xs = ([], xs)
+        nonLewds = do
+            (x, xs) <- parse lewds
+            guard . not $ x `insEq` "lewds"
+            guard $ length xs > 0
+            return (x, xs)
+    obj <- fmap (("nick", getUsernick meta) :) $ forM nonLewds $ \(x, xs) -> do
+        n <- liftIO $ randomRIO (0, length xs - 1)
+        return $ (x, xs !! n)
+    let lewds' = fromJust $ lookup "lewds" (parse lewds) <|> Just []
+    ln <- liftIO $ randomRIO (0, length lewds' - 1)
+    if null lewds'
+        then return EmptyMsg
+        else return . UserMsg $ (lewds' !! ln) % obj
 
 -- | Recent manga releases and searching function.
 manga :: [String] -> String -> Memory (Message String)
@@ -361,9 +395,9 @@ manga cargs str = do
         genMangas (date:mangatitle:vol:chp:group:rest) =
             let mangaStr = unwords [ "\ETX12[" ++ strip group ++ "]\ETX"
                                    , mangatitle
-                                   , "[Ch.\ETX13" ++ chp ++ "\ETX,"
-                                   , "Vol.\ETX13" ++ vol ++ "\ETX]"
-                                   , "(\ETX13" ++ date ++ "\ETX)"
+                                   , "[Ch.\ETX08" ++ chp ++ "\ETX,"
+                                   , "Vol.\ETX08" ++ vol ++ "\ETX]"
+                                   , "(\ETX08" ++ date ++ "\ETX)"
                                    ]
             in mangaStr : genMangas rest
         genMangas _ = []
@@ -511,8 +545,13 @@ variable2 args str = do
                 guard $ if isGlobal then isGlobalVar var else True
                 return $ varContents var
         case mvar of
-            Just x -> return $ ChannelMsg x
-            Nothing -> return $ EmptyMsg
+            Just x -> do
+                x' <- parser x
+                return $ if x' == EmptyMsg
+                    then ChannelMsg x
+                    else x'
+            Nothing -> do
+                return $ EmptyMsg
       Just (vartype, varname, varcontent) -> do -- write var
         liftIO $ putStrLn "Writing var..."
         h <- liftIO $ openFile varPath ReadMode
@@ -553,10 +592,10 @@ weather _ str = do
   where getData element = fromMaybeString $ findAttr (QName "data" Nothing Nothing) element
         getConditionData elems = map (map getData . onlyElems . elContent) elems
         formatCondition [condition, tempF, tempC, humidity, _, wind] =
-            concat ["\ETX05Today\ETX: ", tempF, "\176F / ", tempC, "\176C, ",
+            concat ["\ETX12Today\ETX: ", tempF, "\176F / ", tempC, "\176C, ",
                     join ", " [condition, humidity, wind]]
         formatCondition _ = []
-        formatForecast [day, _, _, _, condition] = "\ETX05" ++ day ++ "\ETX: " ++ condition
+        formatForecast [day, _, _, _, condition] = "\ETX12" ++ day ++ "\ETX: " ++ condition
         formatForecast _ = []
 
 -- | Wikipedia intro printing function.

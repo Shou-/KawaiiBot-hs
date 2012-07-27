@@ -36,7 +36,7 @@ Example: `.^ 10`
 * `.$`
 Variable storing/fetching function.<br>
 It takes one optional colon argument, the user who should take ownership of the variable, and a string in the variable syntax.<br>
-Example: `.$:friend Reminder linux = Please remember to install a distribution of your choice!`<br>
+Example: `.$:nick Reminder linux = Please remember to install a distribution of your choice!`<br>
 Example: `.$ linux`<br>
 Example: `.$ Remove linux = I don't like this anymore`<br>
 Where `Reminder` is optional and can be replaced with `Personal`, `Immutable` or `Normal`. The second example just prints the variable contents.<br>
@@ -107,8 +107,18 @@ Example: `.lewd ++ .lewd`
 ## .lewd
 The format for the lewd function's file is currently looking something like this:
 ```
-"Hey! This is a string! Woohoo~ \ETX04\x2665\ETX"
-"It's another string! They are separated by newlines."
-"Also, %(user) is a dummy-face!"
+lewds:
+    %(greet) This is a string! Woohoo~ ♡
+    It's another string! They are separated by newlines.
+    Also, %(user) is a %(insult)!
+greet:
+    Hey!
+    Hello!
+    Hola!
+insult:
+    dummy-face
+    stupid idiot
+    ⑨
 ```
-Where `\ETX` is the character needed to color text over IRC, `\x2665` is the unicode 'black heart' character and %(user) will be replaced by the nick of the one using the `.lewd` function.
+The `lewds` list must be there, however, everything else is a variable that you
+can use inside the `lewds`.

@@ -18,12 +18,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 {-
 TODO:
-    Finish all the functions
+    - Finish all the functions
         - Translate
             - New Microsoft App ID fixes this.
         - Dictionary
         - Variable
             - Global variables
+            - List
         - Calc
             - Needs to be rewritten.
         - Help
@@ -36,28 +37,31 @@ TODO:
             - Can be used with planned parens
         - Diff
             f x y = filter (not . (`elem` y)) x
-    Add command line arguments, such as making it not autojoin any
-    servers/channels and instead only join ones specified by a certain parameter.
-    Core data needs to be parsed, such as `getservers'.
-    Add `owner' to Server data.
-        Be able to control KawaiiBot through ownership
-            Quit servers/channels
-            Join Servers/channels
-            Other stuff
-    Add operator escaping or make certain functions ignore operators.
-    Add parens for the functions/operators
-        `.lewd -> (.ra 100 -> .sed s/matcher/replacer/)`
-    Add timeouts between usage of functions that can becustomized per channel
-    in Config.hs.
-        Per channel and user or just channel timeout?
-    Let `events' store data for later use.
-        Make event functions loop in their own threads and pass data to each
-        other. This will allow functions such as `diff' to work properly.
-            Even functions that output the same to all channels.
-            Odd functions that run the event function for each channel.
-    Add more lewdness
-        Random adjecatives, verbs and body parts.
-        Change the lewd file's syntax.
+    - Add command line arguments, such as making it not autojoin any
+      servers/channels and instead only join ones specified by a certain
+      parameter.
+    - Core data needs to be parsed, such as `getservers'.
+    - Add `owner' to Server data.
+        - Be able to control KawaiiBot through ownership
+            - Quit servers/channels
+            - Join Servers/channels
+            - Other stuff
+    - Add operator escaping or make certain functions ignore operators.
+    - Add parens for the functions/operators
+        - `.lewd -> (.ra 100 -> .sed s/matcher/replacer/)`
+    - Add timeouts between usage of functions that can becustomized per channel
+      in Config.hs.
+        - Per channel and user or just channel timeout?
+    - Let `events' store data for later use.
+        - Make event functions loop in their own threads and pass data to each
+          other. This will allow functions such as `diff' to work properly.
+            - Even functions that output the same to all channels.
+            - Odd functions that run the event function for each channel.
+    - Add more lewdness
+        - Random adjecatives, verbs and body parts.
+        - Change the lewd file's syntax.
+    - Remove unnecessary modules.
+        - mtl
 -}
 
 module Main where

@@ -28,7 +28,7 @@ storagePath = "/home/username/irc/"
     - sed
     - airing
     - help
-    - lastMsg
+    - findMsg
     - lewd
     - manga
     - random
@@ -78,7 +78,7 @@ Helper functions:
 
                             -- event functions
                             -- print a random message from the log for this channel
-randomMsg = defaultEvent { eventFunc = pipe (random [] "1000") lastMsg [] ""
+randomMsg = defaultEvent { eventFunc = pipe (random [] "1000") findMsg [] ""
 
                             -- how frequently it will run (every hour here)
                          , eventRunTime = return 3600

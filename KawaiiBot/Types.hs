@@ -71,6 +71,13 @@ instance Functor Message where
     fmap f (UserMsg x) = UserMsg (f x)
     fmap f EmptyMsg = EmptyMsg
 
+instance Monad Message where
+    return x = ChannelMsg x
+    (ChannelMsg x) >>= f = f x
+    (UserMsg x) >>= f = f x
+    EmptyMsg >>= f = EmptyMsg
+    fail x = EmptyMsg
+
 -- | For interpreting IRC messages
 data Funa = Add String Funa
             -- ^ The \`++' IRC operator
@@ -86,8 +93,8 @@ data Funa = Add String Funa
             -- ^ Empty, only used if the IRC message parser reaches an error
           deriving (Show, Read)
 
--- | Blacklist or whitelist a list of something, for example IRC channels.
--- Used in Config.hs
+-- | Blacklist or whitelist something, for example a list of IRC channels.
+-- Used in Config.hs.
 data Allowed a = Blacklist { getBlacklist :: a }
                | Whitelist { getWhitelist :: a }
                deriving (Show)
@@ -98,7 +105,7 @@ data Config = Config { serversC :: [Server]
                      , eventsC :: [Event]
                     -- ^ Bot events
                      , lewdPathC :: FilePath
-                    -- ^ Path of the file read by `"KawaiiBot.Bot.lewd'.
+                    -- ^ Path of the file read by `KawaiiBot.Bot.lewd'.
                      , logsPathC :: FilePath
                     -- ^ Directory where log files are stored.
                      , variablePathC :: FilePath
