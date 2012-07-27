@@ -29,9 +29,9 @@ It acts the same way as `.>`.<br>
 Example: `.< Psst, KawaiiBot! please print some lewd messages.`
 
 * `.^`
-Gets the last message from the channel's log.<br>
-It takes one argument, an integer, starting at zero.<br>
-Example: `.^ 10`
+Searches for a message in the bot's chatlog.<br>
+It takes two optional arguments. The index of the list of matches, and a search string. If no search string is given, it matches against everything.<br>
+Example: `.^:4 banana -apple`
 
 * `.$`
 Variable storing/fetching function.<br>
