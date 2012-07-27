@@ -121,4 +121,5 @@ insult:
     ⑨
 ```
 The `lewds` list must be there, however, everything else is a variable that you
-can use inside the `lewds`.
+can use inside the `lewds`. %(user) is replaced by the nick of the user
+executing the `.lewd` function.
