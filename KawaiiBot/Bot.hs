@@ -129,7 +129,7 @@ run x =
                 isup args string
         | cmd `isCmd` "lewd" -> -- Lewd message
             allowThen allowLewd $
-                lewd2 args string
+                lewd args string
         | cmd `isCmd` "ma" -> -- Recent manga releases
             allowThen allowManga $
                 manga args string
@@ -142,6 +142,9 @@ run x =
         | cmd `isCmd` "tr" -> -- Translate 
             allowThen allowTranslate $
                 translate args string
+        | cmd `isCmd` "us" -> -- Userlist
+            allowThen allowUserlist $
+                userlist args string
         | cmd `isCmd` "we" -> -- Weather
             allowThen allowWeather $
                 weather args string
@@ -182,7 +185,7 @@ userMsg = echo UserMsg
 --
 sed2 :: [String] -> String -> Memory (Message String)
 sed2 _ ('s':x:xs) = do
-    let f :: (Bool, (Int, ((String, String), String))) 
+    let f :: (Bool, (Int, ((String, String), String)))
           -> Char 
           -> (Bool, (Int, ((String, String), String)))
         f (True, (n, ((a, b), c))) x'
@@ -209,6 +212,7 @@ sed2 _ ('s':x:xs) = do
         Left e -> return EmptyMsg
 sed2 _ _ = return EmptyMsg
 
+-- No more folding ``please!''
 sed3 :: String -> Memory (Message String)
 sed3 _ = return EmptyMsg
 
@@ -344,9 +348,21 @@ findMsg args str = do
                 else EmptyMsg
     return msg
 
+-- | Print userlist
+userlist :: [String] -> String -> Memory (Message String)
+userlist _ _ = do --asks $ ChannelMsg . unwords . getUserlist . getMeta
+    meta <- asks getMeta
+    let userlist = getUserlist meta
+        users = unwords userlist
+    liftIO $ do
+        print meta
+        print userlist
+        print users
+    return $ ChannelMsg users
+
 -- | Output lewd strings.
-lewd2 :: [String] -> String -> Memory (Message String)
-lewd2 _ _ = do
+lewd :: [String] -> String -> Memory (Message String)
+lewd _ _ = do
     meta <- asks getMeta
     lewdPath <- asks (lewdPathC . getConfig)
     lewds <- liftIO . fmap lines $ readFile lewdPath
@@ -622,6 +638,6 @@ wiki args s = do
 
 diff :: [String] -> Memory String
 diff xs = do
-    temp <- asks (getTemp . getMeta)
+    temp <- asks (getUserlist . getMeta)
     let xs' = filter (not . (`elem` temp)) xs
     return $ joinUntil ", " xs' 400

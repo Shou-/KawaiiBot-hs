@@ -79,9 +79,45 @@ getByServerURL s xs = foldr f Nothing xs
 -- what
 findServer :: [Server] -> String -> Maybe Server
 findServer [] _ = Nothing
-findServer (server@(Server _ url _ _ _ _ _):xs) s = if s == url
+findServer (server@(Server _ url _ _ _ _ _ _):xs) s = if s == url
     then Just server
     else findServer xs s
+
+injectServerUserlist :: [Server] -- original servers
+                     -> String -- server url
+                     -> String -- channel
+                     -> [String] -- userlist
+                     -> [Server] -- modified servers
+injectServerUserlist xs s c us =
+    let mserver = xs `findServer` s
+        servers = do
+            x <- xs
+            guard $ serverURL x /= s
+            return x
+    in case mserver of
+        Just (Server po se ch ni ns ac af ms) ->
+            let im = do
+                    m <- ms
+                    guard $ getDestino m /= c
+                    return m
+                mm = listToMaybe $ do
+                    m <- ms
+                    guard $ getDestino m == c
+                    return m
+            in case mm of
+                Just (Meta des nic nam hos cha ser use) ->
+                    let meta = Meta des nic nam hos cha ser us
+                        metas = meta : im
+                        server = Server po se ch ni ns ac af metas
+                    in server : servers
+                -- How to handle new channels?
+                Nothing ->
+                    let meta = Meta c [] [] [] [] s us
+                        metas = meta : im
+                        server = Server po se ch ni ns ac af metas
+                    in server : servers
+        -- How to handle new servers?
+        Nothing -> xs
 
 -------------------------------------------------------------------------------
 -- ** Tuple utils
@@ -126,8 +162,9 @@ istrip (x:xs) | x /= ' '  = x : istrip' xs
         istrip'' []         = []
 istrip _ = []
 
+-- can't you just use the list monad for this
 -- | A list of prefixes to remove from a string.
-removePrefixes :: [String] -> String -> String
+removePrefixes :: Eq a => [[a]] -> [a] -> [a]
 removePrefixes [] str = str
 removePrefixes (x:xs) str =
     let f n [] = (n == length x, [])
@@ -273,7 +310,7 @@ curlGetString' url opt =
         errorfunc e = print e >> return ""
         opt' = opt ++ [ CurlFollowLocation True
                       , CurlTimeout 5
-                      , CurlMaxFileSize (1024 * 1024 * 5)
+                      , CurlMaxFileSize (1024 ^ 2)
                       , CurlUserAgent $ unwords [ "Mozilla/5.0"
                                                 , "(X11; Linux x86_64;"
                                                 , "rv:10.0.2)"
@@ -345,6 +382,30 @@ injectMeta meta (MetaConfig _ config) = MetaConfig meta config
 -- | Apply a function to the Config within MetaConfig
 modConfig :: (Config -> Config) -> MetaConfig -> MetaConfig
 modConfig f (MetaConfig meta config) = MetaConfig meta $ f config
+
+-- | Apply a function to the userlist within a meta
+mapMetaUserlist :: ([String] -> [String]) -> Meta -> Meta
+mapMetaUserlist f (Meta de ni us ho ch se li) = Meta de ni us ho ch se $ f li
+
+-- | Apply a function to the servers within a config
+mapConfigServers :: ([Server] -> [Server]) -> Config -> Config
+mapConfigServers f (Config se ev le lo va ap ms ve) =
+    Config (f se) ev le lo va ap ms ve
+
+-- | Get a server's meta from the config. Return emptyMeta on fail.
+getConfigMeta :: Config
+              -> String -- server
+              -> String -- channel
+              -> Meta -- server's meta
+getConfigMeta (Config se _ _ _ _ _ _ _) s c =
+    let mm = M.join $ listToMaybe $ do
+        server <- se
+        guard $ serverURL server == s
+        return $ listToMaybe $ do
+            m <- serverMetas server
+            guard $ getDestino m == c
+            return m
+    in fromJust $ mm <|> Just emptyMeta
 
 -------------------------------------------------------------------------------
 -- ** Text.XML.Light utils

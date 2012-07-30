@@ -43,15 +43,23 @@ import System.IO
 import System.Random (randomRIO)
 
 
--- | Writes a String to a handle and prints the message
-write :: Handle -> String -> Memory ()
-write h str = do
+-- | Writes to the core which then passes it to an IRC channel or user.
+ircwrite :: Handle -> String -> Memory ()
+ircwrite h str = do
     meta <- asks getMeta
     let server = getServer meta
         message = server ++ ":" ++ str
     e <- liftIO $ try (hPutStrLn h message) :: Memory (Either SomeException ())
     case e of
         Right _ -> liftIO . putStrLn $ '>' : message
+        Left e -> liftIO $ print e
+
+-- | Writes to the core.
+corewrite :: Handle -> String -> Memory ()
+corewrite h str = do
+    e <- liftIO $ try (hPutStrLn h str) :: Memory (Either SomeException ())
+    case e of
+        Right _ -> liftIO . putStrLn $ '>' : str
         Left e -> liftIO $ print e
 
 -- | Reinitialize an event.
@@ -76,7 +84,7 @@ event h = do
                     servers = eventServers event
                     metas :: [Meta]
                     metas = concat . (`map` servers) $
-                        \(Server _ server _ _ _ channels _) ->
+                        \(Server _ server _ _ _ channels _ _) ->
                             case channels of
                                 Blacklist chans -> []
                                 Whitelist chans ->
@@ -86,7 +94,7 @@ event h = do
                     text <- local (injectMeta meta) $ eventFunc event
                     unless (null text) $ do
                         local (injectMeta meta) $ do
-                            write h $ genPrivmsg meta text
+                            ircwrite h $ genPrivmsg meta text
                 eventInit event
             | not bool -> return event
             | not cbool -> eventInit event
@@ -100,32 +108,68 @@ event h = do
             return (n >= i)
 
 -- | Recursive function that gets a line from kawaiibot-core and parses it.
-listenLoop :: Handle -> MVar [String] -> Memory ()
-listenLoop h eventMVar = do
+listenLoop :: Handle -> Memory ()
+listenLoop h = do
     s <- liftIO $ hGetLine h
-    parse h s
-    listenLoop h eventMVar
+    let arg = takeWhile (/= ':') s
+    if arg `elem` coreArgs then do
+        mc <- parseCore h s
+        local (\_ -> mc) $ listenLoop h
+    else do
+        parseIRC h s
+        listenLoop h
+  where coreArgs = [ "getservers"
+                   , "getnick"
+                   , "serverjoin"
+                   , "serverquit"
+                   , "getuserlist"
+                   ]
+
+-- | Parse a Core message
+parseCore :: Handle -- ^ Core server handle
+          -> String -- ^ message received
+          -> Memory MetaConfig
+parseCore h bs = do
+    debug <- asks (verbosityC . getConfig)
+    mc@(MetaConfig meta config) <- ask
+    let (sCmd : xs) = split ":" bs
+        sArgs = words $ join ":" xs
+    when (debug > 1) . liftIO . print $ sCmd : sArgs
+    case sCmd of
+        "getuserlist" -> do
+            let margs :: Maybe (String, String, [String])
+                margs = do
+                    (server : channel : users) <- Just sArgs
+                    return (server, channel, users)
+            case margs of
+                Just (se, ch, us) -> do
+                    let servs = injectServerUserlist (serversC config) se ch us
+                        conf = mapConfigServers (\_ -> servs) config
+                    return $ MetaConfig meta conf
+                -- Not enough arguments (this isn't supposed to ever happen)
+                Nothing -> return mc
+        -- Fallback
+        _ -> return mc
 
 -- | Parse an IRC message.
-parse :: Handle -- IRC server handle
-      -> String -- message received
-      -> Memory ()
-parse h bs = do
+parseIRC :: Handle -- ^ Core server handle
+         -> String -- ^ message received
+         -> Memory ()
+parseIRC h bs = do
     meta <- asks getMeta
     let nick = getUsernick meta
         sFull :: [String]
         sFull = ":" `split` bs
         sMsg  = ":" `join` drop 2 sFull
-        sArgs = map strip . splits "!@ " . concat $ take 1 $ drop 1 sFull
+        sArgs = map strip . splits "!@ " . concat . take 1 $ drop 1 sFull
         meta' = sFull !! 0 `injectServ` meta
     liftIO . putStrLn $ show sArgs ++ ' ' : sMsg
-    if sFull !! 0 `elem` coreArgs
-        then return () -- do something you loser
-        else local (injectMeta meta') $ parseMsg h (sArgs, sMsg)
+    local (injectMeta meta') $ parseMsg h (sArgs, sMsg)
   where parseMsg :: Handle -> ([String], String) -> Memory ()
         parseMsg h (args, msg)
-            | isCmd args 3 "PRIVMSG" = do -- Interpret message and respond if anything's returned from `parser'
-                meta <- asks getMeta
+            | isCmd args 3 "PRIVMSG" = do -- Interpret message and respond if
+                meta <- asks getMeta      -- anything is returned from `parser'
+                config <- asks getConfig
                 let nick = args !! 0
                     name = args !! 1
                     host = args !! 2
@@ -133,9 +177,9 @@ parse h bs = do
                     dest = args !! 4
                     channels = getChannels meta
                     serverurl = getServer meta
-                    temp = getTemp meta
+                    ulist = getUserlist $ getConfigMeta config serverurl dest
 
-                    meta' = Meta dest nick name host channels serverurl temp
+                    meta' = Meta dest nick name host channels serverurl ulist
 
                 local (injectMeta meta') $ do
                     meta <- asks getMeta
@@ -147,14 +191,14 @@ parse h bs = do
                         forM_ urls $ \url -> do
                             title' <- fmap fromMsg $ title url
                             let message = "PRIVMSG " ++ dest ++ " :\ETX5Title\ETX: " ++ title'
-                            unless (null title') $ write h message
+                            unless (null title') $ ircwrite h message
                     post <- parser msg
                     let mAct = if isChannelMsg post
                             then "PRIVMSG " ++ dest
                             else "PRIVMSG " ++ nick
                         msg' = fromMsg post
 
-                    unless (null msg') . write h $ mAct ++ " :" ++ msg'
+                    unless (null msg') . ircwrite h $ mAct ++ " :" ++ msg'
 
                     logsPath <- asks (logsPathC . getConfig)
                     verbosity <- asks (verbosityC . getConfig)
@@ -177,7 +221,7 @@ parse h bs = do
                     dest = args !! 4
                     channels = getChannels meta
                     serverurl = getServer meta
-                    temp = getTemp meta
+                    temp = getUserlist meta
 
                     meta' = Meta dest nick name host channels serverurl temp
 
@@ -186,31 +230,38 @@ parse h bs = do
                 case allowedChans of
                     Just (Blacklist xs) -> do
                         if msg `elem` xs then do
-                            write h $ "JOIN " ++ msg
+                            ircwrite h $ "JOIN " ++ msg
                         else do
-                            write h $ "PRIVMSG " ++ dest ++ " :Your channel is blacklisted."
+                            let msg = "Your channel is blacklisted."
+                            ircwrite h $ "PRIVMSG " ++ dest ++ " :" ++ msg
                     Just (Whitelist xs) -> do
                         if msg `elem` xs then do
-                            write h $ "JOIN " ++ msg
+                            ircwrite h $ "JOIN " ++ msg
                         else do
-                            write h $ "PRIVMSG " ++ dest ++ " :Your channel is not whitelisted."
+                            let msg = "Your channel is not whitelisted."
+                            ircwrite h $ "PRIVMSG " ++ dest ++ " :" ++ msg
                     Nothing -> return ()
                 return ()
             | isCmd args 3 "KICK" = do 
+                meta <- asks getMeta
                 let dest = args !! 4
+                    serverurl = getServer meta
 
-                return ()
+                corewrite h $ "getuserlist:" ++ unwords [serverurl, dest]
             | isCmd args 3 "PART" = do
+                meta <- asks getMeta
                 let nick = args !! 0
                     dest = args !! 4
+                    serverurl = getServer meta
 
-                return ()
+                corewrite h $ "getuserlist:" ++ unwords [serverurl, dest]
             | isCmd args 3 "JOIN" = do
                 meta <- asks getMeta
                 let nick = args !! 0
                     dest = msg
                     serverurl = getServer meta
 
+                corewrite h $ "getuserlist:" ++ unwords [serverurl, dest]
                 varPath <- asks (variablePathC . getConfig)
                 svars <- liftIO $ lines <$> readFile varPath
                 let mvar :: [Variable]
@@ -223,13 +274,13 @@ parse h bs = do
                         return var
                 case length mvar of
                   0 -> return ()
-                  1 -> write h $ unwords [ "PRIVMSG"
+                  1 -> ircwrite h $ unwords [ "PRIVMSG"
                                          , dest
                                          , ':' : nick ++ ":"
                                          , varContents $ head mvar
                                          ]
                   _ ->
-                    write h $ unwords [ "PRIVMSG"
+                    ircwrite h $ unwords [ "PRIVMSG"
                                       , dest
                                       , ':' : nick ++ ":"
                                       , "You have " ++ show (length mvar)
@@ -237,13 +288,39 @@ parse h bs = do
                                       , unwords $ map varName mvar
                                       ]
             | isCmd args 3 "QUIT" = do 
+                meta <- asks getMeta
+                servers <- asks (serversC . getConfig)
                 let nick = args !! 0
+                    serverurl = getServer meta
 
-                return ()
+                let mchans :: Maybe [String]
+                    mchans = listToMaybe $ do
+                        s <- servers
+                        guard $ serverURL s == serverurl
+                        return $ do
+                            m <- serverMetas s
+                            return $ getDestino m
+                    chans = fromJust $ mchans <|> Just []
+
+                forM_ chans $ \chan -> do
+                    corewrite h $ "getuserlist:" ++ unwords [serverurl, chan]
             | isCmd args 3 "NICK" = do 
+                meta <- asks getMeta
+                servers <- asks (serversC . getConfig)
                 let nick = args !! 0
+                    serverurl = getServer meta
 
-                return ()
+                let mchans :: Maybe [String]
+                    mchans = listToMaybe $ do
+                        s <- servers
+                        guard $ serverURL s == serverurl
+                        return $ do
+                            m <- serverMetas s
+                            return $ getDestino m
+                    chans = fromJust $ mchans <|> Just []
+
+                forM_ chans $ \chan -> do
+                    corewrite h $ "getuserlist:" ++ unwords [serverurl, chan]
             | isCmd args 3 "MODE" = do 
                 let nick = args !! 0
                     dest = args !! 4
@@ -258,7 +335,6 @@ parse h bs = do
                 return ()
             | otherwise = do -- Fallback
                 return ()
-        coreArgs = ["getservers", "getnick", "serverjoin", "serverquit"]
         isCmd args n x | length args >= 3 = args !! 3 == x
                        | otherwise = False
 
@@ -272,8 +348,7 @@ serverConnect = do
         hSetNewlineMode h (NewlineMode CRLF CRLF)
         forkIO . forever $ getLine >>= \s -> unless (null s) $ hPutStrLn h s
         return h
-    eventMVar <- liftIO $ newMVar []
     events <- asks (eventsC . getConfig)
     events' <- mapM eventInit events
     local (modConfig $ injectEvents events') (forkMe $ event h)
-    listenLoop h eventMVar
+    listenLoop h

@@ -119,15 +119,15 @@ data Config = Config { serversC :: [Server]
                     -- 0: No messages. 1: Errors. 2: Debug and errors.
                      }
 
-defaultConfig = Config { serversC = []
-                       , eventsC = []
-                       , lewdPathC = ""
-                       , logsPathC = ""
-                       , variablePathC = ""
-                       , msAppIdC = ""
-                       , msgLoggingC = False
-                       , verbosityC = 1
-                       }
+dConfig = Config { serversC = []
+                 , eventsC = []
+                 , lewdPathC = ""
+                 , logsPathC = ""
+                 , variablePathC = ""
+                 , msAppIdC = ""
+                 , msgLoggingC = False
+                 , verbosityC = 1
+                 }
 
 -- | Define a server for Config
 data Server = Server { serverPort :: Int
@@ -145,16 +145,18 @@ data Server = Server { serverPort :: Int
                      , allowedFuncs :: [(String, Funcs)]
                     -- ^ Which functions are allowed to be used.
                     -- Takes a list of channel and Funcs.
+                     , serverMetas :: [Meta]
                      } deriving (Show)
 
-defaultServer = Server { serverPort = 6667
-                       , serverURL = ""
-                       , serverChans = []
-                       , serverNick = ""
-                       , serverNSPass = ""
-                       , allowedChannels = Blacklist []
-                       , allowedFuncs = []
-                       }
+dServer = Server { serverPort = 6667
+                 , serverURL = ""
+                 , serverChans = []
+                 , serverNick = ""
+                 , serverNSPass = ""
+                 , allowedChannels = Blacklist []
+                 , allowedFuncs = []
+                 , serverMetas = []
+                 }
 
 -- | A timed event for Config
 -- Events will most likely become saner in the future.
@@ -173,13 +175,13 @@ data Event = Event { eventFunc :: Memory String
                     -- ^ Temporary data stored by event functions.
                    }
 
-defaultEvent = Event { eventFunc = return ""
-                     , eventRunTime = return 0
-                     , eventTime = 0
-                     , eventChance = 0
-                     , eventServers = []
-                     , eventTemp = []
-                     }
+dEvent = Event { eventFunc = return ""
+               , eventRunTime = return 0
+               , eventTime = 0
+               , eventChance = 0
+               , eventServers = []
+               , eventTemp = []
+               }
 
 -- | Message metadata.
 -- What the hell is this?
@@ -201,7 +203,7 @@ data Meta = Meta { getDestino :: String
                 -- ^ This isn't even used!
                  , getServer :: String
                 -- ^ Server the message came from.
-                 , getTemp :: [String]
+                 , getUserlist :: [String]
                 -- ^ wat
                  } deriving (Show, Eq)
 
@@ -237,6 +239,8 @@ data Funcs = Funcs { allowEcho :: Bool
                    , allowTranslate :: Bool
                     -- ^ Allow usage of the translation function, `.tr'.
                     -- It doesn't ``just werk''!
+                   , allowUserlist :: Bool
+                   -- ^ Allow printing the userlist.
                    , allowBind :: Bool
                     -- ^ Allow usage of the bind operator, \`>>'.
                    , allowPipe :: Bool
@@ -247,26 +251,27 @@ data Funcs = Funcs { allowEcho :: Bool
                     -- ^ Allow usage of the reverse pipe operator \`$$'.
                    } deriving (Show)
 
-defaultFuncs = Funcs { allowEcho = True
-                     , allowTitle = False
-                     , allowWeather = True
-                     , allowAnime = True
-                     , allowAiring = True
-                     , allowManga = True
-                     , allowWiki = True
-                     , allowIsup = True
-                     , allowSed = True
-                     , allowLewd = True
-                     , allowRandom = True
-                     , allowHistory = True
-                     , allowVariable = True
-                     , allowTranslate = False
-                        -- Operators
-                     , allowBind = False
-                     , allowPipe = True
-                     , allowAdd = True
-                     , allowApp = True
-                     }
+dFuncs = Funcs { allowEcho = True
+               , allowTitle = False
+               , allowWeather = True
+               , allowAnime = True
+               , allowAiring = True
+               , allowManga = True
+               , allowWiki = True
+               , allowIsup = True
+               , allowSed = True
+               , allowLewd = True
+               , allowRandom = True
+               , allowHistory = True
+               , allowVariable = True
+               , allowTranslate = False
+               , allowUserlist = False
+                  -- Operators
+               , allowBind = False
+               , allowPipe = True
+               , allowAdd = True
+               , allowApp = True
+               }
 
 -- | Reader monad used by Client.hs and its sub-modules.
 type Memory = ReaderT MetaConfig IO
@@ -291,9 +296,15 @@ data MVars = MVars { clientsMVar :: MVar [CClient]
 
 -- | Core client data, client hostname and handle.
 type CClient = (String, Handle)
+
 -- | Core server data, IRC server URL and handle.
-type CServer = (String, Handle)
+data CServer = CServer { getcServerURL :: String
+                       , getcHandle :: Handle
+                       , getcMetas :: [Meta]
+                       } deriving (Show)
+
 -- | Core message data, IRC server URL and text.
 type CMessage = (String, T.Text)
+
 -- | Core timestamp data, IRC server URL and timestamp.
 type CTimestamp = (String, Int)

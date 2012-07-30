@@ -78,91 +78,91 @@ Helper functions:
 
                             -- event functions
                             -- print a random message from the log for this channel
-randomMsg = defaultEvent { eventFunc = pipe (random [] "1000") findMsg [] ""
+randomMsg = dEvent { eventFunc = pipe (random [] "1000") findMsg [] ""
 
-                            -- how frequently it will run (every hour here)
-                         , eventRunTime = return 3600
+                    -- how frequently it will run (every hour here)
+                   , eventRunTime = return 3600
 
-                            -- chance of executing the event
-                         , eventChance = 0.7
+                    -- chance of executing the event
+                   , eventChance = 0.7
 
-                            -- servers/channels it prints to
-                         , eventServers = [eventRizon]
-                         }
+                    -- servers/channels it prints to
+                   , eventServers = [eventRizon]
+                   }
                             -- print airing anime
-animeAiring = defaultEvent { eventFunc = plain (airing ["10"] "")
-                           , eventRunTime = return 3600
-                           , eventChance = 1
-                           , eventServers = [eventRizon]
-                           }
+animeAiring = dEvent { eventFunc = plain (airing ["10"] "")
+                     , eventRunTime = return 3600
+                     , eventChance = 1
+                     , eventServers = [eventRizon]
+                     }
 
                             -- server for events
                             -- only server and channels are necessary
-eventRizon = defaultServer { serverURL = "irc.rizon.net"
-                            -- Note: blacklisting is not yet implemented,
-                            --       do not use it.
-                           , allowedChannels = Whitelist ["#KawaiiBot"]
-                           }
+eventRizon = dServer { serverURL = "irc.rizon.net"
+                        -- Note: blacklisting is not yet implemented,
+                        --       do not use it.
+                     , allowedChannels = Whitelist ["#KawaiiBot"]
+                     }
 
-freenode = Server { serverURL = "irc.freenode.net"
-                  , serverChans = ["#mychannel"]
-                  , serverPort = 6667
-                  , serverNick = "QuteBot"
-                                    -- NickServ password
-                  , serverNSPass = ""
-                                    -- The only channels KawaiiBot should join
-                                    -- if invited.
-                  , allowedChannels = Whitelist ["#kawaiibot"]
-                  , allowedFuncs = []
-                  }
-rizon = Server { serverURL = "irc.rizon.net"
-                  , serverChans = ["#KawaiiBot"]
-                  , serverPort = 6667
-                  , serverNick = "QuteBot"
-                  , serverNSPass = ""
+freenode = dServer { serverURL = "irc.freenode.net"
+                   , serverChans = ["#mychannel"]
+                   , serverPort = 6667
+                   , serverNick = "QuteBot"
+                                     -- NickServ password
+                   , serverNSPass = ""
+                                     -- The only channels KawaiiBot should join
+                                     -- if invited.
+                   , allowedChannels = Whitelist ["#kawaiibot"]
+                   , allowedFuncs = []
+                   }
+rizon = dServer { serverURL = "irc.rizon.net"
+                , serverChans = ["#KawaiiBot"]
+                , serverPort = 6667
+                , serverNick = "QuteBot"
+                , serverNSPass = ""
                                     -- Channels that KawaiiBot shouldn't join
                                     -- if invited.
-                  , allowedChannels = Blacklist ["#malicious", "#channels"]
-                  , allowedFuncs = funcs
-                  }
+                , allowedChannels = Blacklist ["#malicious", "#channels"]
+                , allowedFuncs = funcs
+                }
                     -- channel where the allowed functions apply to
   where funcs = [ ("#KawaiiBot",
                             -- See `Types.hs' if you want to see what the names
                             -- of the variables are and the default values.
-                            -- Search for `defaultFuncs'.
+                            -- Search for `dFuncs'.
 
                                         -- Allow title fetching for URLs
-                        defaultFuncs { allowTitle = True
-                                        -- Disallow printing of lewd messages
-                                     , allowLewd = False
-                                     }
+                        dFuncs { allowTitle = True
+                                -- Disallow printing of lewd messages
+                               , allowLewd = False
+                               }
                   )
-                , ("#someotherchannel", defaultFuncs)
+                , ("#someotherchannel", dFuncs)
                 ]
 
-config =            -- file where variables are stored by the `.$' function.
-    defaultConfig { variablePathC   = storagePath ++ "variables"
+config =    -- file where variables are stored by the `.$' function.
+    dConfig { variablePathC   = storagePath ++ "variables"
 
-                    -- file where lines printed by `.lewd' are read.
-                  , lewdPathC       = storagePath ++ "lewds"
+            -- file where lines printed by `.lewd' are read.
+            , lewdPathC       = storagePath ++ "lewds"
 
-                    -- directory where logs are stored.
-                  , logsPathC       = storagePath ++ "logs/"
+            -- directory where logs are stored.
+            , logsPathC       = storagePath ++ "logs/"
 
-                  , msAppIdC        = ""
+            , msAppIdC        = ""
 
-                    -- events
-                  , eventsC         = [randomMsg, animeAiring]
+            -- events
+            , eventsC         = [randomMsg, animeAiring]
 
-                    -- servers
-                  , serversC        = [freenode, rizon]
+            -- servers
+            , serversC        = [freenode, rizon]
 
-                    -- whether to log messages or not
-                  , msgLoggingC     = True
+            -- whether to log messages or not
+            , msgLoggingC     = True
 
-                    -- level of verbosity
-                        -- 0 prints no errors
-                        -- 1 prints important errors
-                        -- 2 prints general information and important errors
-                  , verbosityC      = 1
-                  }
+            -- level of verbosity
+                -- 0 prints no errors
+                -- 1 prints important errors
+                -- 2 prints general information and important errors
+            , verbosityC      = 1
+            }

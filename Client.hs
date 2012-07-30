@@ -24,7 +24,12 @@ TODO:
         - Dictionary
         - Variable
             - Global variables
-            - List
+            - List a user's variables.
+            - Better `Remove' syntax.
+            - Better syntax in general.
+                - `.$ Reminder var contents here`
+                - `.$ var contents here`
+                - Get out, `=' character!
         - Calc
             - Needs to be rewritten.
         - Help
@@ -36,7 +41,10 @@ TODO:
             - Can be stored in .$ variables
             - Can be used with planned parens
         - Diff
-            f x y = filter (not . (`elem` y)) x
+            - f x y = filter (not . (`elem` y)) x
+        - Lewd
+            - Add an argument, how many lewds to print.
+              No more `.lewd ++ .lewd ++ .lewd ++ .lewd`!
     - Add command line arguments, such as making it not autojoin any
       servers/channels and instead only join ones specified by a certain
       parameter.
@@ -49,7 +57,7 @@ TODO:
     - Add operator escaping or make certain functions ignore operators.
     - Add parens for the functions/operators
         - `.lewd -> (.ra 100 -> .sed s/matcher/replacer/)`
-    - Add timeouts between usage of functions that can becustomized per channel
+    - Add timeouts between usage of functions that can be customized per channel
       in Config.hs.
         - Per channel and user or just channel timeout?
     - Let `events' store data for later use.
@@ -58,10 +66,12 @@ TODO:
             - Even functions that output the same to all channels.
             - Odd functions that run the event function for each channel.
     - Add more lewdness
-        - Random adjecatives, verbs and body parts.
-        - Change the lewd file's syntax.
+        - pls giv ideas
     - Remove unnecessary modules.
-        - mtl
+    - Customizable function prefix.
+    TODO: Fix bug in `.sed' where regex match is always case insensitive.
+    - Add data storing for functions somewhere.
+        - Use MVar ?
 -}
 
 module Main where
@@ -108,7 +118,7 @@ mainTest :: Memory ()
 mainTest = forever $ do
     line <- liftIO getLine
     let msg = "localhost:Owner!Owner@control PRIVMSG #KawaiiBot :" ++ line
-    parse stdout msg
+    parseIRC stdout msg
   where meta = Meta dest nick name host chans server temp
         dest = "#KawaiiBot"
         nick = "Owner"

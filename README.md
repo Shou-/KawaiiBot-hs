@@ -42,6 +42,11 @@ Example: `.$ Remove linux = I don't like this anymore`<br>
 Where `Reminder` is optional and can be replaced with `Personal`, `Immutable` or `Normal`. The second example just prints the variable contents.<br>
 `Personal`: Only printable by the variable owner. `Reminder`: Same as personal, but may be printed when the variable owner joins the channel. `Immutable`: Can only be modified by the owner. `Normal`: Printable and modifiable by all. `Remove`: Deletes a variable.
 
+* `.us`
+Userlist printing function.<br>
+Takes no arguments.
+Example: `.us`
+
 * `.sed`
 A regex replace function.<br>
 It takes two arguments, the regex matching and replacing string and a string.<br>
@@ -121,5 +126,5 @@ insult:
     ⑨
 ```
 The `lewds` list must be there, however, everything else is a variable that you
-can use inside the `lewds`. %(user) is replaced by the nick of the user
-executing the `.lewd` function.
+can use inside the `lewds` and they will be chosen randomly from the list.
+`%(user)` is replaced by the nick of the user executing the `.lewd` function.
