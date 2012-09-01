@@ -2,7 +2,7 @@ KawaiiBot Haskell
 =================
 
 This is a Haskell rewrite of KawaiiBot.
-KawaiiBot is a lewd IRC bot that does useless things, such as checking the weather, grabbing information about anime and manga, and printing lewd messages.
+KawaiiBot is a kawaii IRC bot that does useless things, such as checking the weather, grabbing information about anime and manga, and much more.
 
 See `Config.example.hs` for options.
 
@@ -26,7 +26,7 @@ Example: `.> I-it's not like I'm sending this because I want to or a-anything, i
 * `.<`
 Prints a message to the user.<br>
 It acts the same way as `.>`.<br>
-Example: `.< Psst, KawaiiBot! please print some lewd messages.`
+Example: `.< Psst, KawaiiBot! Please print some kawaii messages.`
 
 * `.^`
 Searches for a message in the bot's chatlog.<br>
@@ -44,7 +44,7 @@ Where `Reminder` is optional and can be replaced with `Personal`, `Immutable` or
 
 * `.us`
 Userlist printing function.<br>
-Takes no arguments.
+Takes no arguments.<br>
 Example: `.us`
 
 * `.sed`
@@ -114,7 +114,7 @@ The format for the lewd function's file is currently looking something like this
 ```
 lewds:
     %(greet) This is a string! Woohoo~ ♡
-    It's another string! They are separated by newlines.
+    It's another string! They need to be indented by at least one space!
     Also, %(user) is a %(insult)!
 greet:
     Hey!
