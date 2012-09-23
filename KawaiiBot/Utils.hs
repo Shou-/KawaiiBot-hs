@@ -455,8 +455,7 @@ injectServ :: String -> Meta -> Meta
 injectServ str (Meta d n u h c _ o) = Meta d n u h c str o
 
 -- | Inject a list of Events into Config
-injectEvents events (Config s1 _ f1 f2 f3 f4 f5 s2 b2 i) =
-    Config s1 events f1 f2 f3 f4 f5 s2 b2 i
+injectEvents events c = c { eventsC = events }
 
 -- this is used?
 injectTemp temp (Event f r ti c s _) = Event f r ti c s temp
@@ -475,16 +474,16 @@ mapMetaUserlist f (Meta de ni us ho ch se li) = Meta de ni us ho ch se $ f li
 
 -- | Apply a function to the servers within a config
 mapConfigServers :: ([Server] -> [Server]) -> Config -> Config
-mapConfigServers f (Config se ev le yu sa lo va ap ms ve) =
-    Config (f se) ev le yu sa lo va ap ms ve
+mapConfigServers f c = c { serversC = f (serversC c) }
 
 -- | Get a server's meta from the config. Return emptyMeta on fail.
 getConfigMeta :: Config
               -> String -- server
               -> String -- channel
               -> Meta -- server's meta
-getConfigMeta (Config se _ _ _ _ _ _ _ _ _) s c =
-    let mm = M.join $ listToMaybe $ do
+getConfigMeta config s c =
+    let se = serversC config
+        mm = M.join $ listToMaybe $ do
         server <- se
         guard $ serverURL server == s
         return $ listToMaybe $ do

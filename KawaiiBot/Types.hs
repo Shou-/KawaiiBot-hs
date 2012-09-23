@@ -168,6 +168,8 @@ data Config = Config { serversC :: [Server]
                     -- ^ Path of the file used by `KawaiiBot.Bot.variable2'.
                      , msAppIdC :: String
                     -- ^ Microsoft app ID used by `KawaiiBot.Bot.translate'.
+                     , prefixesC :: [Char]
+                    -- ^ Function prefix characters.
                      , msgLoggingC :: Bool
                     -- ^ Whether to log or not.
                      , verbosityC :: Int
@@ -183,6 +185,7 @@ dConfig = Config { serversC = []
                  , logsPathC = "log"
                  , variablePathC = "variables"
                  , msAppIdC = ""
+                 , prefixesC = "!"
                  , msgLoggingC = False
                  , verbosityC = 1
                  }

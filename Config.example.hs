@@ -141,28 +141,37 @@ rizon = dServer { serverURL = "irc.rizon.net"
                 ]
 
 config =    -- file where variables are stored by the `.$' function.
-    dConfig { variablePathC   = storagePath ++ "variables"
+    dConfig { variablePathC = storagePath ++ "variables"
 
             -- file where lines printed by `.lewd' are read.
-            , lewdPathC       = storagePath ++ "lewds"
+            , lewdPathC     = storagePath ++ "lewds"
+
+            -- file where yuri owners are stored.
+            , yuriPathC     = storagePath ++ "yuri"
+
+            -- file where sage amounts are stored.
+            , sagePathC     = storagePath ++ "sage"
 
             -- directory where logs are stored.
-            , logsPathC       = storagePath ++ "logs/"
+            , logsPathC     = storagePath ++ "logs/"
 
-            , msAppIdC        = ""
+            , msAppIdC      = ""
 
             -- events
-            , eventsC         = [randomMsg, animeAiring]
+            , eventsC       = [randomMsg, animeAiring]
 
             -- servers
-            , serversC        = [freenode, rizon]
+            , serversC      = [freenode, rizon]
+
+            -- Function prefix characters
+            , prefixesC     = ['.', '!']
 
             -- whether to log messages or not
-            , msgLoggingC     = True
+            , msgLoggingC   = True
 
             -- level of verbosity
                 -- 0 prints no errors
                 -- 1 prints important errors
                 -- 2 prints general information and important errors
-            , verbosityC      = 1
+            , verbosityC    = 1
             }

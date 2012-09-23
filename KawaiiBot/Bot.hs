@@ -95,24 +95,25 @@ toFuna xs =
 -- | Parse the Funa data and use `run' where necessary.
 interpret :: Funa -> Memory (Message String)
 interpret Void = return EmptyMsg
-interpret (Plain s) = run s
+interpret (Plain s) = prefixesC . getConfig <$> ask >>= run s
 interpret (Add s f) = allowThen allowAdd $ do
-    rs <- run s
+    rs <- prefixesC . getConfig <$> ask >>= run s
     ex <- interpret f
     return $ rs `mergeMsg` ex
 interpret (Bind s f) = allowThen allowBind $ interpret f
-interpret (Pipe s f) = allowThen allowPipe $ run s >>= interpret . deepPipe f
+interpret (Pipe s f) = allowThen allowPipe $ do
+    prefixesC . getConfig <$> ask >>= run s >>= interpret . deepPipe f
 interpret (App s f) = allowThen allowApp $ do
     ex <- fmap fromMsg $ interpret f
-    run $ s ++ ex
+    prefixesC . getConfig <$> ask >>= run (s ++ ex)
 
 -- | Run an IRC bot function and return the string.
 --
 -- @
 -- run \".> I like bananas.\"
 -- @
-run :: String -> Memory (Message String)
-run x =
+run :: String -> [Char] -> Memory (Message String)
+run x px =
     let (fcmd, fstring) = span (/= ' ') x
         (cmd : args) = split ":" fcmd <|> ["", ""]
         string = dropWhile (== ' ') fstring
@@ -176,7 +177,7 @@ run x =
         | x `isCTCP` "VERSION" -> -- CTCP VERSION message
                 return . UserMsg $ "VERSION " ++ botversion
         | otherwise -> return EmptyMsg
-  where isCmd (x:xs) cmd = and [x `elem` ".:!", xs == cmd]
+  where isCmd (x:xs) cmd = and [x `elem` px, xs == cmd]
         isCmd _ _ = False
         isCTCP ('\SOH':xs) y = y `isPrefixOf` xs
         isCTCP _ _ = False
