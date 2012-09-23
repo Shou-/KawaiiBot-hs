@@ -9,7 +9,7 @@ https://github.com/Shou-/KawaiiBot-hs
 
 -}
 
-module KawaiiBot.Config (config) where
+module Config (config) where
 
 -- this imports the Types needed
 import KawaiiBot.Types
@@ -100,7 +100,7 @@ animeAiring = dEvent { eventFunc = plain (airing ["10"] "")
                             -- only server and channels are necessary
 eventRizon = dServer { serverURL = "irc.rizon.net"
                         -- Note: blacklisting is not yet implemented,
-                        --       do not use it.
+                        --       do not use it here.
                      , allowedChannels = Whitelist ["#KawaiiBot"]
                      }
 
@@ -129,9 +129,9 @@ rizon = dServer { serverURL = "irc.rizon.net"
   where funcs = [ ("#KawaiiBot",
                             -- See `Types.hs' if you want to see what the names
                             -- of the variables are and the default values.
-                            -- Search for `dFuncs'.
+                            -- Search for `data Funcs'.
 
-                                        -- Allow title fetching for URLs
+                                -- Allow title fetching for URLs
                         dFuncs { allowTitle = True
                                 -- Disallow printing of lewd messages
                                , allowLewd = False

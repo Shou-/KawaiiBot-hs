@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -}
 
 {-# LANGUAGE DoAndIfThenElse #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK prune #-}
 
 module KawaiiBot.Utils where
@@ -30,16 +31,29 @@ import Control.Concurrent
 import Control.Exception
 import qualified Control.Monad as M
 import Control.Monad.Reader
-import Data.Char (toUpper, toLower)
+
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.ByteString.Char8 as C8
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.CaseInsensitive as CI
+import Data.Char (toUpper, toLower, isDigit)
 import Data.Maybe (fromJust, listToMaybe)
 import Data.String.Utils (split, replace)
 import qualified Data.Text as T
+import qualified Data.Text.Lazy as TL
+
 import Network.CGI (urlEncode, urlDecode)
 import Network.Curl
+import Network.HTTP.Conduit
+import Network.HTTP.Conduit.Browser
+
+import System.Directory
+import System.IO
+
 import Text.XML.Light
 
 
-botversion = "KawaiiBot 0.1.6"
+botversion = "KawaiiBot 0.1.7"
 
 -------------------------------------------------------------------------------
 -- ** Message utils
@@ -139,6 +153,33 @@ insLookup :: String -> [(String, b)] -> Maybe b
 insLookup _ [] = Nothing
 insLookup s ((s',b):xs) = if s `insEq` s' then Just b else insLookup s xs
 
+mapFst :: (a -> b) -> (a, c) -> (b, c)
+mapFst f (a, b) = (f a, b)
+
+mapSnd :: (a -> b) -> (c, a) -> (c, b)
+mapSnd f (a, b) = (a, f b)
+
+fst3 :: (a, b, c) -> a
+fst3 (x, _, _) = x
+
+snd3 :: (a, b, c) -> b
+snd3 (_, x, _) = x
+
+trd3 :: (a, b, c) -> c
+trd3 (_, _, x) = x
+
+fst4 :: (a, b, c, d) -> a
+fst4 (x, _, _, _) = x
+
+snd4 :: (a, b, c, d) -> b
+snd4 (_, x, _, _) = x
+
+trd4 :: (a, b, c, d) -> c
+trd4 (_, _, x, _) = x
+
+frd4 :: (a, b, c, d) -> d
+frd4 (_, _, _, x) = x
+
 -------------------------------------------------------------------------------
 -- ** String utils
 -------------------------------------------------------------------------------
@@ -195,17 +236,24 @@ sepFilterText x (stracc, filacc) = if negateWord x
   where negateWord :: T.Text -> Bool
         negateWord = T.isPrefixOf (T.pack "-")
 
+sepFilterLText :: TL.Text -> ([TL.Text], [TL.Text]) -> ([TL.Text], [TL.Text])
+sepFilterLText x (stracc, filacc) = if negateWord x
+    then (stracc, TL.tail x : filacc)
+    else (x : stracc, filacc)
+  where negateWord :: TL.Text -> Bool
+        negateWord = TL.isPrefixOf (TL.pack "-")
+
 unlines' :: [String] -> String
 unlines' (x:[]) = x
 unlines' xs     = unlines xs
 
 -- | Take until Int then add an ellipsis
-cutoff :: String -> Int -> String
-cutoff s n = if length s > n then (take n s) ++ "…" else s
+cutoff :: Int -> String -> String
+cutoff n s = if length s > n then (take n s) ++ "…" else s
 
 -- | Join until length String >= Int
-joinUntil :: String -> [String] -> Int -> String
-joinUntil str strs n =
+joinUntil :: Int -> String -> [String] -> String
+joinUntil n str strs =
     let str' = snd $ foldl (\(status, acc) x ->
             let acc' = acc ++ x ++ str
             in if status && length acc' <= n
@@ -228,6 +276,17 @@ breakLate f xs =
 bisect :: (a -> Bool) -> [a] -> ([a], [a])
 bisect f xs = fmap (drop 1) $ break f xs
 
+-- | Take a matching element from the list and return the rest of the list.
+getWithList :: (a -> Bool) -> [a] -> (Maybe a, [a])
+getWithList _ [] = (Nothing, [])
+getWithList f (x:xs) | f x = (Just x, xs)
+                     | otherwise = let (m, xs') = getWithList f xs
+                                   in (m, x : xs')
+
+safeCycle :: [a] -> [a]
+safeCycle [] = []
+safeCycle xs = cycle xs
+
 -------------------------------------------------------------------------------
 -- ** Variable utils
 -------------------------------------------------------------------------------
@@ -247,7 +306,7 @@ readableVar _ _ _ _ _ = False
 
 -- | Is the Variable `Global'?
 isGlobalVar :: Variable -> Bool
-isGlobalVar (Global _ _ _) = True
+isGlobalVar (Global {}) = True
 isGlobalVar _ = False
 
 -- | Is the Variable a readable `Reminder'?
@@ -333,8 +392,40 @@ urlDecode' :: String -> String
 urlDecode' = decodeString . urlDecode
 
 -------------------------------------------------------------------------------
--- ** Memory utils
+-- ** HTTP utils
 -------------------------------------------------------------------------------
+
+{-
+httpGetString :: MonadIO m => String -> m (Response BL.ByteString)
+httpGetString url = liftIO $ withManager $ \man -> do
+    initReq <- parseUrl url
+    let req = initReq { requestHeaders = (htitle, buagent)
+                                         : requestHeaders req
+                      }
+    httpLbs req man
+  where
+    htitle = CI.mk "User-Agent"
+    buagent = B64.encode $ C8.pack useragent
+    useragent = unwords [
+          "Mozilla/5.0"
+        , "(X11; Linux x86_64;"
+        , "rv:10.0.2)"
+        , "Gecko/20100101"
+        , "Firefox/10.0.2"
+        ]
+-}
+
+-------------------------------------------------------------------------------
+-- ** CMemory/Memory utils
+-------------------------------------------------------------------------------
+
+io :: MonadIO m => IO a -> m a
+io = liftIO
+
+getcConfig :: CMemory Config
+getcConfig = do
+    mvs <- asks getcMVars
+    io $ readMVar $ configMVar mvs
 
 -- | Fork for the Memory monad.
 forkMe :: (MonadReader r m, MonadIO m) => ReaderT r IO () -> m ThreadId
@@ -342,35 +433,30 @@ forkMe m = do
     r <- ask
     liftIO . forkIO $ runReaderT m r
 
--- | Allow function then do
-allowThen :: (Funcs -> Bool) -> Memory (Message String) -> Memory (Message String)
+-- | Allow function then do.
+allowThen :: (Funcs -> Bool) -- ^ allowFunc function, for example `allowTitle'.
+          -> Memory (Message String) -- ^ A message inside the Memory monad.
+          -> Memory (Message String)
 allowThen f m = do
-    func <- getFunc f
-    if func
-        then m
-        else return EmptyMsg
-
--- | 
-getFunc :: (Funcs -> Bool) -> Memory Bool
-getFunc f = do
     config <- asks getConfig
     meta <- asks getMeta
     let servers = serversC config
         mServer :: Maybe Server
-        mServer = findServer servers (getServer meta)
-                -- this needs to be case-insensitive
+        mServer = findServer servers $ getServer meta
         mFuncs = fmap (insLookup (getDestino meta) . allowedFuncs) mServer
         func :: Bool
-        func = safeFromMaybe False . fmap f . M.join $ mFuncs
-    return func
+        func = safeFromMaybe False . fmap f $ M.join mFuncs
+    if func
+        then m
+        else return EmptyMsg
 
 -- | Inject a server URL into a Meta
 injectServ :: String -> Meta -> Meta
 injectServ str (Meta d n u h c _ o) = Meta d n u h c str o
 
 -- | Inject a list of Events into Config
-injectEvents events (Config s1 _ f1 f2 f3 s2 b2 i) =
-    Config s1 events f1 f2 f3 s2 b2 i
+injectEvents events (Config s1 _ f1 f2 f3 f4 f5 s2 b2 i) =
+    Config s1 events f1 f2 f3 f4 f5 s2 b2 i
 
 -- this is used?
 injectTemp temp (Event f r ti c s _) = Event f r ti c s temp
@@ -389,15 +475,15 @@ mapMetaUserlist f (Meta de ni us ho ch se li) = Meta de ni us ho ch se $ f li
 
 -- | Apply a function to the servers within a config
 mapConfigServers :: ([Server] -> [Server]) -> Config -> Config
-mapConfigServers f (Config se ev le lo va ap ms ve) =
-    Config (f se) ev le lo va ap ms ve
+mapConfigServers f (Config se ev le yu sa lo va ap ms ve) =
+    Config (f se) ev le yu sa lo va ap ms ve
 
 -- | Get a server's meta from the config. Return emptyMeta on fail.
 getConfigMeta :: Config
               -> String -- server
               -> String -- channel
               -> Meta -- server's meta
-getConfigMeta (Config se _ _ _ _ _ _ _) s c =
+getConfigMeta (Config se _ _ _ _ _ _ _ _ _) s c =
     let mm = M.join $ listToMaybe $ do
         server <- se
         guard $ serverURL server == s
@@ -406,6 +492,17 @@ getConfigMeta (Config se _ _ _ _ _ _ _) s c =
             guard $ getDestino m == c
             return m
     in fromJust $ mm <|> Just emptyMeta
+
+getServerNick :: Memory String
+getServerNick = do
+    meta <- asks getMeta
+    servers <- asks (serversC . getConfig)
+    let serverurl = getServer meta
+        mnick = listToMaybe $ do
+            server <- servers
+            guard $ serverURL server `insEq` serverurl
+            return $ serverNick server
+    return . fromJust $ mnick <?> Just ""
 
 -------------------------------------------------------------------------------
 -- ** Text.XML.Light utils
@@ -523,11 +620,6 @@ safeFromMaybe :: a -> Maybe a -> a
 safeFromMaybe _ (Just a) = a
 safeFromMaybe a Nothing = a
 
--- | Is Nothing?
-isNothing :: Maybe a -> Bool
-isNothing Nothing = True
-isNothing _       = False
-
 -- | Read that returns Nothing on error
 maybeRead :: Read a => String -> Maybe a
 maybeRead = fmap fst . listToMaybe . reads
@@ -572,24 +664,197 @@ plain x = fmap fromMsg x
 x <?> y | x /= empty = x
         | otherwise = y
 
+(>|<) :: (Applicative m, Alternative m, Eq (m a)) => m a -> m a -> m a
+x >|< y | x == empty = x
+        | y == empty = y
+        | otherwise = x <|> y
+
+-------------------------------------------------------------------------------
+-- ** Parser utils
+-------------------------------------------------------------------------------
+
+
+parseConf :: [String] -> [(String, [String])]
+parseConf [] = []
+parseConf ([]:xs) = parseConf xs
+parseConf (x:xs) =
+    let title = takeWhile (/= ':') x
+        (start, rest) = inparse xs
+    in (title, start) : parseConf rest
+  where inparse :: [String] -> ([String], [String])
+        inparse [] = ([], [])
+        inparse ([]:xs) = inparse xs
+        inparse ((' ':ys):xs) =
+            let x = dropWhile (== ' ') ys
+            in if null x
+                then inparse xs
+                else mapFst ([x] ++) $ inparse xs
+        inparse xs = ([], xs)
+
+-------------------------------------------------------------------------------
+-- ** IO utils
+-------------------------------------------------------------------------------
+
+safeWriteFile :: FilePath -> String -> IO ()
+safeWriteFile f s = do
+    (t, h) <- openTempFile "/tmp" ""
+    hPutStr h s
+    hClose h
+    copyFile t f
+    removeFile t
+
+-- | Read a file strictly
+sReadFile :: FilePath -> IO String
+sReadFile s = do
+    h <- openFile s ReadMode
+    c <- hGetContents h
+    c `seq` hClose h
+    return c
+
+-------------------------------------------------------------------------------
+-- ** Eq utils
+-------------------------------------------------------------------------------
+
+-- | Case insensitive (`==') function limited to `String's.
+insEq :: String -> String -> Bool
+insEq [] [] = True
+insEq [] _ = False
+insEq _ [] = False
+insEq (x:xs) (y:ys) = x `elem` [toUpper y, toLower y] && insEq xs ys
+
+-- | Case insensitive `elem' function limited to `String's.
+insElem :: String -> [String] -> Bool
+insElem _ [] = False
+insElem x (y:ys) = x `insEq` y || x `insElem` ys
+
+-- | Case insensitive `isInfixOf' function limited to `String's.
+insIsInfixOf :: String -> String -> Bool
+insIsInfixOf xs ys = f xs xs ys
+  where f _ [] _ = True
+        f _ _ [] = False
+        f o (x:xs) (y:ys) | [x] `insEq` [y] = f o xs ys
+                          | otherwise = f o o ys
+
+-- | Are all `Char's digits?
+isDigits :: String -> Bool
+isDigits = and . map isDigit
+
+takeWhileOrd :: (a -> a -> Bool) -> [a] -> [a]
+takeWhileOrd f xs = g xs []
+  where g [] _ = []
+        g (x:xs) [] = x : g xs [x]
+        g (x:xs) [y] | f x y = x : g xs [x]
+                     | otherwise = []
+
+maybeInsEq :: String -> Maybe String -> Bool
+maybeInsEq x Nothing = False
+maybeInsEq x (Just y) = x `insEq` y
+
+-------------------------------------------------------------------------------
+-- ** Yuri utils
+-------------------------------------------------------------------------------
+
+-- |
+totalStats :: Yuri -> Int
+totalStats (Yuri _ _ Nothing (x, y, z)) = x + y + z
+totalStats (Yuri _ _ (Just (_, (x',y',z'))) (x,y,z)) = x + x' + y + y' + z + z'
+
+-- |
+oneStat :: ((Int, Int, Int) -> Int) -> Yuri -> Int
+oneStat f (Yuri _ _ Nothing s) = f s
+oneStat f (Yuri _ _ (Just (_, s')) s) = f s + f s'
+
+-- |
+applyStats :: (Int, Int, Int) -> Yuri -> Yuri
+applyStats (s'1, s'2, s'3) (Yuri n i w (s1,s2,s3)) =
+    Yuri n i w (s1 `plus` s'1, s2 `plus` s'2, s3 `plus` s'3)
+  where plus x y | x + y `elem` [0 .. 30] = x + y
+                 | otherwise = x
+
+-- |
+applyWep :: (Int, Int, Int) -> Maybe (String, (Int, Int, Int)) -> (Int, Int, Int)
+applyWep stats Nothing = stats
+applyWep (x,y,z) (Just (wep, (x',y',z'))) = (x + x', y + y', z + z')
+
+-- |
+getWepStats :: Maybe (String, (Int, Int, Int)) -> (Int, Int, Int)
+getWepStats Nothing = (0, 0, 0)
+getWepStats (Just (_, stats)) = stats
+
+-- |
+getWeaponStat :: Maybe (String, (Int, Int, Int)) -> Int
+getWeaponStat Nothing = 0
+getWeaponStat (Just (_, (x, y, z))) | x >= 1 = x
+                                    | y >= 1 = y
+                                    | z >= 1 = z
+
+-- |
+getBonusStat :: Maybe (String, (Int, Int, Int)) -> [Int]
+getBonusStat Nothing = [0, 0, 0]
+getBonusStat (Just (wep, (x, y, z)))
+    | x >= 1 = [1, 0, 0]
+    | y >= 1 = [0, 1, 0]
+    | z >= 1 = [0, 0, 1]
+    | otherwise = [0, 0, 0]
+
+-- |
+showApplyWep :: (Int, Int, Int) -> Maybe (String, (Int, Int, Int)) -> String
+showApplyWep stats Nothing = show stats
+showApplyWep (x, y, z) (Just (_, (x', y', z')))
+    | x' >= 1 = concat [ "(", show x, "\ETX09+", show x', "\ETX, ", show y, ", ", show z, ")" ]
+    | y' >= 1 = concat [ "(", show x, ", ", show y, "\ETX09+", show y', "\ETX, ", show z, ")" ]
+    | z' >= 1 = concat [ "(", show x, ", ", show y, ", ", show z, "\ETX09+", show z', "\ETX)" ]
+    | otherwise = "\ETX05ERROR\ETX"
+
+-- |
+isYuris :: String -> String -> Yuris -> Bool
+isYuris s c (Yuris s' c' _) = s == s' && c == c'
+
+-- |
+ownerModTime :: YuriOwner -> Double -> YuriOwner
+ownerModTime (YuriOwner n h _ ys) t = YuriOwner n h t ys
+
+-- |
+isOwner :: String -> YuriOwner -> Bool
+isOwner n (YuriOwner n' _ _ _) = n `insEq` n'
+
+-- |
+addOwners :: Yuris -> [YuriOwner] -> Yuris
+addOwners (Yuris s c _) os = Yuris s c os
+
+-- |
+addYuri :: YuriOwner -> Yuri -> YuriOwner
+addYuri (YuriOwner n h t ys) y = YuriOwner n h t $ y : ys
+
+-- |
+writeYuriss :: [Yuris] -> Memory ()
+writeYuriss ys = do
+    yuripath <- asks $ yuriPathC . getConfig
+    let yurispath = yuripath ++ " yuris"
+    liftIO $ safeWriteFile yurispath $ unlines $ map show ys
+
+-- |
+statsMinus :: (Int, Int, Int) -> (Int, Int, Int) -> (Int, Int, Int)
+statsMinus (x, y, z) (x', y', z') =
+    let x'' = x - (x' `div` 2) - (floor $ 1.3 * fromIntegral y')
+        y'' = y - (y' `div` 2) - (floor $ 1.3 * fromIntegral z')
+        z'' = z - (z' `div` 2) - (floor $ 1.3 * fromIntegral x')
+    in (x'', y'', z'')
+
+-- |
+showWep :: Yuri -> String
+showWep (Yuri nick img Nothing stats) = show stats
+showWep (Yuri nick img wep stats) =
+    unwords [showApplyWep stats wep, wepName wep]
+
+-- |
+wepName :: Maybe (String, (Int, Int, Int)) -> String
+wepName Nothing = ""
+wepName (Just (wep, _)) = wep
+
 -------------------------------------------------------------------------------
 -- ** Unsorted utils
 -------------------------------------------------------------------------------
-
--- Make this lazier
--- | Case insensitive (`==') function.
-insEq :: String -> String -> Bool
-insEq a b = let (bool, v) = foldl f (True, a) b
-            in if length v > 0 then False else bool
-  where f (_, []) x = (False, [])
-        f (b, (y:ys)) x = if x `elem` [toUpper y, toLower y]
-            then (b, ys)
-            else (False, [])
-
--- | Are all Chars numbers?
-isNum :: String -> Bool
-isNum [] = False
-isNum str = foldr (\x acc -> if x `elem` ['0' .. '9'] then acc else False) True str
 
 -- | Generic safe `read' function
 safeRead :: Read a => String -> a -> a

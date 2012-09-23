@@ -1,5 +1,5 @@
-name:               KawaiiBot
-version:            0.1.6
+Name:               KawaiiBot
+Version:            0.1.7
 Synopsis:           The lewd IRC bot that does useless things.
 Author:             Shou
 Maintainer:         shou@gnusokyo
@@ -13,19 +13,26 @@ Executable kawaiibot-client
     GHC-Options:
         -threaded
     Build-Depends:
+        attoparsec,
         base,
-        curl,
+        base64-bytestring,
+        bytestring,
+        case-insensitive,
         cgi,
-        fgl,
-        HTTP,
+        containers,
+        curl,
+        directory,
+        http-conduit,
         json,
         MissingH,
         mtl,
         network,
+        old-locale,
         process,
         random,
         regex-compat,
         text,
+        time,
         utf8-string,
         xml
     Main-Is:
@@ -35,9 +42,12 @@ Executable kawaiibot-core
     GHC-Options:
         -threaded
     Build-Depends:
+        attoparsec,
+        base,
+        mtl,
+        stm,
         text,
-        time,
-        directory
+        time
     Main-Is:
         Core.hs
 

@@ -28,7 +28,7 @@ import Control.Applicative
 import Control.Concurrent (MVar)
 import Control.Monad.Reader
 import Data.Monoid
-import Data.String.Utils (replace)
+import Data.String.Utils (replace, split)
 import qualified Data.Text as T
 import System.IO (Handle)
 
@@ -45,6 +45,12 @@ instance PyFormat String (String, String) where
 instance PyFormat String String where
     (%) x y = replace "%s" y x
 
+instance PyFormat String [String] where
+    (%) x [] = x
+    (%) x ys =
+        let ys' = ys ++ [""] ++ cycle ["%s"]
+        in concat $ zipWith (++) (split "%s" x) ys'
+
 -- | Data for the variable function in "KawaiiBot.Bot".
 data Variable = Immutable String String String String String
                 -- ^ IRC server, channel, nick, var name and var contents.
@@ -57,6 +63,52 @@ data Variable = Immutable String String String String String
               | Global String String String
                 -- ^ Nick, var name and var contents.
               deriving (Show, Read, Eq)
+
+-- Server, channel, list of yuri.
+-- |
+data Yuris = Yuris { yuriServer :: String
+                    -- ^ Server
+                   , yuriChannel :: String
+                    -- ^ Channel
+                   , yuriOwners :: [YuriOwner]
+                    -- ^ Owner list
+                   } deriving (Eq, Show, Read)
+
+-- | Owner of the yuri.
+data YuriOwner = YuriOwner { ownerName :: String
+                           , ownerHost :: String
+                           , ownerTime :: Double
+                           , ownerYuris :: [Yuri]
+                           } deriving (Eq, Show, Read)
+
+-- |
+data Yuri = Yuri { yuriName :: String
+                -- ^ Name of Yuri.
+                 , yuriImage :: String
+                -- ^ Yuri's image.
+                 , yuriWeapon :: Maybe (String, (Int, Int, Int))
+                -- ^ Yuri weapon.
+                 , yuriStats :: (Int, Int, Int)
+                -- ^ Yuri stats. Moe, lewdness and strength.
+                 } deriving (Eq, Show, Read)
+
+dYuris = Yuris "irc.server.net" "#channel" [
+      YuriOwner "sm" "localhost"  0.0  [ Yuri "Cirno" "Cirno is kawaii" (Just ("Ice cream", (0,0,0))) (9, 9, 9)
+                                       , Yuri "Reimu" "I like your armpits" (Just ("Donation box", (0,0,0))) (1, 2, 3)
+                                       ]
+    , YuriOwner "Fogun" "google.com" 0.0 [ Yuri "Kyouko" "She is a dog" Nothing (3, 2, 1) ]
+    ]
+
+-- |
+data YuriAction = YuriAction { actionName :: String
+                             , actionYuri1 :: (Int, Int, Int)
+                             , actionYuri2 :: (Int, Int, Int)
+                             , actionMsgs :: [String]
+                             } deriving (Eq, Show, Read)
+
+data Sages = Sages { sageServer :: String
+                   , getSagers :: [(String, String, Int, Double)]
+                   } deriving (Eq, Show, Read)
 
 -- | Message data for functions 
 data Message a = ChannelMsg a
@@ -106,6 +158,10 @@ data Config = Config { serversC :: [Server]
                     -- ^ Bot events
                      , lewdPathC :: FilePath
                     -- ^ Path of the file read by `KawaiiBot.Bot.lewd'.
+                     , yuriPathC :: FilePath
+                    -- ^ Path of the file read by `KawaiiBot.Bot.yuri'.
+                     , sagePathC :: FilePath
+                    -- ^ Path of the file read by `KawaiiBot.Bot.sage'.
                      , logsPathC :: FilePath
                     -- ^ Directory where log files are stored.
                      , variablePathC :: FilePath
@@ -121,9 +177,11 @@ data Config = Config { serversC :: [Server]
 
 dConfig = Config { serversC = []
                  , eventsC = []
-                 , lewdPathC = ""
-                 , logsPathC = ""
-                 , variablePathC = ""
+                 , lewdPathC = "lewds"
+                 , yuriPathC = "yuri"
+                 , sagePathC = "sage"
+                 , logsPathC = "log"
+                 , variablePathC = "variables"
                  , msAppIdC = ""
                  , msgLoggingC = False
                  , verbosityC = 1
@@ -229,6 +287,10 @@ data Funcs = Funcs { allowEcho :: Bool
                    , allowSed :: Bool
                     -- ^ Allow usage of the regex replace function, `.sed'
                    , allowLewd :: Bool
+                    -- ^ Allow usage of the `sage' function, `.sage'.
+                   , allowSage :: Bool
+                    -- ^ Allow usage of the Haskell eval function, `.e'.
+                   , allowMueval :: Bool
                     -- ^ Allow usage of the random string function, `.lewd'.
                    , allowRandom :: Bool
                     -- ^ Allow usage of the random numer/choice function, `.ra'.
@@ -240,7 +302,11 @@ data Funcs = Funcs { allowEcho :: Bool
                     -- ^ Allow usage of the translation function, `.tr'.
                     -- It doesn't ``just werk''!
                    , allowUserlist :: Bool
-                   -- ^ Allow printing the userlist.
+                    -- ^ Allow usage of the userlist printing function.
+                   , allowComments :: Bool
+                    -- ^ Allow KawaiiBot's keyword responses.
+                   , allowYuri :: Bool
+                    -- ^ Allow usage of the yuri battle function.
                    , allowBind :: Bool
                     -- ^ Allow usage of the bind operator, \`>>'.
                    , allowPipe :: Bool
@@ -261,11 +327,15 @@ dFuncs = Funcs { allowEcho = True
                , allowIsup = True
                , allowSed = True
                , allowLewd = True
+               , allowSage = True
+               , allowMueval = False
                , allowRandom = True
                , allowHistory = True
                , allowVariable = True
                , allowTranslate = False
                , allowUserlist = False
+               , allowComments = False
+               , allowYuri = True
                   -- Operators
                , allowBind = False
                , allowPipe = True
@@ -284,18 +354,19 @@ type CMemory = ReaderT MVarConfig IO
 -- | Data to store in the Reader monad.
 data MVarConfig = MVarConfig { getcChannels :: [(String, [String])]
                              , getcMVars :: MVars
-                             , getcConfig :: Config
                              }
 
 -- | MVars used by Core.hs
-data MVars = MVars { clientsMVar :: MVar [CClient]
+data MVars = MVars { clientsMVar :: MVar CClients
                    , textMVar :: MVar [CMessage]
                    , serverMVar :: MVar [CServer]
                    , timeMVar :: MVar [CTimestamp]
+                   , configMVar :: MVar Config
                    }
 
 -- | Core client data, client hostname and handle.
 type CClient = (String, Handle)
+type CClients = (Int, [CClient])
 
 -- | Core server data, IRC server URL and handle.
 data CServer = CServer { getcServerURL :: String

@@ -69,9 +69,11 @@ TODO:
         - pls giv ideas
     - Remove unnecessary modules.
     - Customizable function prefix.
-    TODO: Fix bug in `.sed' where regex match is always case insensitive.
     - Add data storing for functions somewhere.
         - Use MVar ?
+- Switch from `Network.Curl' to `Network.HTTP'.
+- Find a new weather API.
+- Use Parsec or Attoparsec to parse the history.
 -}
 
 module Main where
@@ -95,8 +97,7 @@ import System.Process
 
 
 printVersion :: IO ()
-printVersion = do
-    putStrLn botversion
+printVersion = putStrLn botversion
 
 -- Opens the config file for reading and passes the data to concurrent
 -- serverConnect methods.
@@ -107,6 +108,7 @@ main = do
         then checkArg args
         else run serverConnect
   where checkArg x  | head x == "--version" = printVersion
+                    | head x == "-v" = printVersion
                     | head x == "--test" = run mainTest
                     | otherwise = run serverConnect
         run f = runReaderT f metaConfig
@@ -117,7 +119,7 @@ main = do
 mainTest :: Memory ()
 mainTest = forever $ do
     line <- liftIO getLine
-    let msg = "localhost:Owner!Owner@control PRIVMSG #KawaiiBot :" ++ line
+    let msg = "localhost:Owner!Owner@home PRIVMSG #kawaiibot :" ++ line
     parseIRC stdout msg
   where meta = Meta dest nick name host chans server temp
         dest = "#KawaiiBot"

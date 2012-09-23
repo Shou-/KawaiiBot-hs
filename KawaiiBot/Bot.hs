@@ -32,22 +32,35 @@ import Control.Exception
 import Control.Monad hiding (join)
 import qualified Control.Monad as M
 import Control.Monad.Reader hiding (join)
+
+import qualified Data.Attoparsec.Text.Lazy as ATL
 import Data.Char
 import Data.List
 import Data.Foldable (foldr')
-import Data.Graph.Inductive.Query.Monad (mapFst, mapSnd)
-import Data.Maybe (fromJust, listToMaybe)
+import Data.Maybe
+import Data.Ord
 import Data.String.Utils
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.IO as TL
+import Data.Time.Clock.POSIX
 import Data.Tuple
+
+import Debug.Trace
+
 import Network.Curl
+import Network.HTTP.Conduit
+import Network.HTTP.Conduit.Browser
+
+import System.Directory
 import System.IO
+import System.Process (readProcessWithExitCode)
 import System.Random (randomRIO)
+
 import Text.Regex
 import Text.JSON
 import Text.XML.Light
-import Debug.Trace
 
 
 -- | Parse a string into Funa data then interpret it, returning the output
@@ -100,7 +113,7 @@ interpret (App s f) = allowThen allowApp $ do
 -- @
 run :: String -> Memory (Message String)
 run x =
-    let (fcmd, fstring) = break (not . (/= ' ')) x
+    let (fcmd, fstring) = span (/= ' ') x
         (cmd : args) = split ":" fcmd <|> ["", ""]
         string = dropWhile (== ' ') fstring
     in case () of
@@ -130,6 +143,9 @@ run x =
         | cmd `isCmd` "lewd" -> -- Lewd message
             allowThen allowLewd $
                 lewd args string
+        | cmd `isCmd` "sage" -> -- Sage a user
+            allowThen allowSage $
+                sage args string
         | cmd `isCmd` "ma" -> -- Recent manga releases
             allowThen allowManga $
                 manga args string
@@ -138,23 +154,29 @@ run x =
                 random args string
         | cmd `isCmd` "sed" -> -- Regular expression replace
             allowThen allowSed $
-                sed2 args string
+                sed args string
         | cmd `isCmd` "tr" -> -- Translate 
             allowThen allowTranslate $
                 translate args string
         | cmd `isCmd` "us" -> -- Userlist
             allowThen allowUserlist $
                 userlist args string
+        | cmd `isCmd` "yuri" -> -- Yuri battle
+            allowThen allowYuri $
+                yuri args string
         | cmd `isCmd` "we" -> -- Weather
             allowThen allowWeather $
                 weather args string
         | cmd `isCmd` "wiki" -> -- Wikipedia
             allowThen allowWiki $
                 wiki args string
+        | cmd `isCmd` "e" -> -- Mueval
+            allowThen allowMueval $
+                heval args string
         | x `isCTCP` "VERSION" -> -- CTCP VERSION message
                 return . UserMsg $ "VERSION " ++ botversion
         | otherwise -> return EmptyMsg
-  where isCmd (x:xs) cmd = and $ [x `elem` ".!", xs == cmd]
+  where isCmd (x:xs) cmd = and [x `elem` ".:!", xs == cmd]
         isCmd _ _ = False
         isCTCP ('\SOH':xs) y = y `isPrefixOf` xs
         isCTCP _ _ = False
@@ -183,8 +205,8 @@ userMsg = echo UserMsg
 --
 -- > .sed s\/banana\/apple\/
 --
-sed2 :: [String] -> String -> Memory (Message String)
-sed2 _ ('s':x:xs) = do
+sed :: [String] -> String -> Memory (Message String)
+sed _ ('s':x:xs) = do
     let f :: (Bool, (Int, ((String, String), String)))
           -> Char 
           -> (Bool, (Int, ((String, String), String)))
@@ -204,31 +226,48 @@ sed2 _ ('s':x:xs) = do
             | otherwise = (False, (n, ((a, b), c ++ [x'])))
         (_, (_, ((match, replacement), string))) = foldl f (False, (1, (("", ""), ""))) xs
         (ins, _:string') = break (== ' ') string
-        insensitive = ins `elem` ["i", "I"]
-        regex = mkRegexWithOpts match True insensitive
+        insensitive = ins /= "i"
+        regex = mkRegexWithOpts match False insensitive
+    liftIO $ print insensitive
     e <- liftIO $ try (return $! subRegex regex string' replacement) :: Memory (Either SomeException String)
     case e of
         Right a -> return $ ChannelMsg a
         Left e -> return EmptyMsg
-sed2 _ _ = return EmptyMsg
+sed _ _ = return EmptyMsg
 
 -- No more folding ``please!''
 sed3 :: String -> Memory (Message String)
 sed3 _ = return EmptyMsg
 
+heval :: [String] -> String -> Memory (Message String)
+heval args str = do
+    debug <- asks (verbosityC . getConfig)
+    -- Time: 2; Inferred type; Execute: `str'.
+    let cargs = ["-t", "5", "-i", "-e", str]
+    (ex, o, e) <- liftIO $ readProcessWithExitCode "mueval" cargs ""
+    case lines o of
+        [horig, htype, hout] -> do
+            if any (`elem` args) ["t", "type", "T"]
+                then return $ ChannelMsg $ cut $ unwords [ horig, "::", htype ]
+                else return $ ChannelMsg $ cut $ hout
+        xs -> do
+            when (debug > 0) . liftIO . putStrLn $ "heval: " ++ show (lines o)
+            return $ ChannelMsg $ cut $ intercalate "; " xs
+  where cut = cutoff 400
+
 -- | Low level anime releases function, instead returning a list of strings.
 anime' :: [String] -> String -> Memory [String]
 anime' args str = do
     let (str', filters) = foldr' sepFilter ("", []) $ words str
-        url = "https://tokyotosho.info/search.php?type=1&terms=" ++ urlEncode' str'
-    html <- liftIO $ curlGetString' url []
+        burl = "http://www.nyaa.eu/?page=search&cats=1_37&filter=2&term="
+    html <- liftIO $ curlGetString' (burl ++ urlEncode' str') []
     let elem' = fromMaybeElement $ parseXMLDoc html
-        qname = QName "a" (Just "http://www.w3.org/1999/xhtml") Nothing
-        attrs = [Attr (QName "type" Nothing Nothing) "application/x-bittorrent"]
+        qname = QName "td" Nothing Nothing
+        attrs = [Attr (QName "class" Nothing Nothing) "tlistname"]
         elems = findElementsAttrs qname attrs elem'
         animes = map (strip . elemsText) elems
         animes' = filter (\x -> not . or $ map (`isInfixOf` x) filters) animes
-        amount = if length args > 1 then (args !! 1) `safeRead` 10 else 10 :: Int
+        amount = if length args > 1 then (args !! 1) `safeRead` 10 else 10
     verbosity <- asks (verbosityC . getConfig)
     liftIO . when (verbosity > 1) $ do
         putStrLn $ "Filters: %(f); str': %(s)" % [("f", join ", " filters), ("s", str')]
@@ -239,7 +278,7 @@ anime :: [String] -> String -> Memory (Message String)
 anime args str = do
     animes <- anime' args str
     let animes' = map (replace "[" "[\ETX12" . replace "]" "\ETX]") animes
-    return . ChannelMsg $ joinUntil ", " animes' 400
+    return . ChannelMsg $ joinUntil 400 ", " animes'
 
 -- | Low level airing anime function, instead returning a list of Strings.
 airing2 :: [String] -> String -> Memory [String]
@@ -287,7 +326,7 @@ airing args str = do
     airs <- airing2 args str
     if null airs
         then return EmptyMsg
-        else return . ChannelMsg $ joinUntil ", " airs 400
+        else return . ChannelMsg $ joinUntil 400 ", " airs
 
 -- TODO: Make this more advanced by printing whether the function is allowed
 -- in this channel or not.
@@ -316,7 +355,6 @@ help _ str = do
             | s == "wiki"       = "Prints the introduction to an article. Ex: .wiki haskell programming language."
             | otherwise         = "Try `.help' and a value. Functions: >, <, ^, $, sed, ai, an, ma, ra, tr, we. Operators: bind, pipe, add, app. More: http://github.com/Shou-/KawaiiBot-hs#readme"
 
--- TODO: Use Text instead.
 -- | Find the nth matching message from the channel chatlog. Where n is the
 -- first colon argument, and a number.
 --
@@ -328,73 +366,146 @@ findMsg args str = do
     logsPath <- asks (logsPathC . getConfig)
     let path = logsPath ++ getServer meta ++ " " ++ getDestino meta
         (strs, filters) = foldr' sepFilterText ([], []) . T.words $ T.pack str
-        searchF x = and $ map (`T.isInfixOf` snd x) strs
-        filterF x = not . or $ map (`T.isInfixOf` snd x) filters
-    r <- fmap (reverse . T.lines) . liftIO $ T.readFile path
-    let history :: [([T.Text], T.Text)]
-        history = do
-            x <- r
-            let msg = maybeRead (T.unpack x) :: Maybe ([T.Text], T.Text)
-            guard $ msg /= Nothing
-            guard $ if not $ null strs then searchF $ fromJust msg else True
-            guard $ if not $ null filters then filterF $ fromJust msg else True
-            return $ fromJust msg
+        searchF x = all (`T.isInfixOf` trd3 x) strs
+        filterF x = not $ any (`T.isInfixOf` trd3 x) filters
+    cs <- liftIO $ TL.readFile path
+    let msgs :: [(T.Text, T.Text, T.Text)]
+        msgs = do
+            line <- reverse $ TL.lines cs
+            let mresult = ATL.maybeResult . (flip ATL.parse) line $ do
+                    time <- ATL.takeWhile1 (/= '\t')
+                    ATL.char '\t'
+                    nick <- ATL.takeWhile1 (/= '\t')
+                    ATL.char '\t'
+                    msg <- ATL.takeWhile1 (/= '\n')
+                    return (time, nick, msg)
+            guard $ isJust mresult
+            return $ fromJust mresult
+        searchh :: [(T.Text, T.Text, T.Text)]
+        searchh = do
+            msg <- msgs
+            guard $ if not $ null strs then searchF msg else True
+            guard $ if not $ null filters then filterF msg else True
+            return msg
         msg :: Message String
         msg = do
             let arg = fromJust $ listToMaybe args <|> Just "0"
                 n = safeRead arg 0
-            if length history > n
-                then return . T.unpack . snd $ history !! n
+            if length searchh > n
+                then return . T.unpack . trd3 $ searchh !! n
                 else EmptyMsg
     return msg
 
 -- | Print userlist
 userlist :: [String] -> String -> Memory (Message String)
-userlist _ _ = do --asks $ ChannelMsg . unwords . getUserlist . getMeta
-    meta <- asks getMeta
-    let userlist = getUserlist meta
-        users = unwords userlist
-    liftIO $ do
-        print meta
-        print userlist
-        print users
-    return $ ChannelMsg users
+userlist _ _ = asks $ ChannelMsg . unwords . getUserlist . getMeta
 
 -- | Output lewd strings.
 lewd :: [String] -> String -> Memory (Message String)
-lewd _ _ = do
+lewd args str = do
     meta <- asks getMeta
     lewdPath <- asks (lewdPathC . getConfig)
     lewds <- liftIO . fmap lines $ readFile lewdPath
-    let parse :: [String] -> [(String, [String])]
-        parse [] = []
-        parse ([]:xs) = parse xs
-        parse (x:xs) =
-            let title = takeWhile (/= ':') x
-                (start, rest) = inparse xs
-            in (title, start) : parse rest
-          where inparse :: [String] -> ([String], [String])
-                inparse [] = ([], [])
-                inparse ([]:xs) = inparse xs
-                inparse ((' ':ys):xs) =
-                    let x = dropWhile (== ' ') ys
-                    in if null x
-                        then inparse xs
-                        else mapFst ([x] ++) $ inparse xs
-                inparse xs = ([], xs)
-        nonLewds = do
-            (x, xs) <- parse lewds
+    let nonLewds = do
+            (x, xs) <- parseConf lewds
             guard . not $ x `insEq` "lewds"
             guard $ length xs > 0
             return (x, xs)
-    obj <- fmap (("nick", getUsernick meta) :) $ forM nonLewds $ \(x, xs) -> do
+        n = safeRead str 1
+        mnick = listToMaybe $ filter (not . null) args
+        nick = fromJust $ mnick <?> Just (getUsernick meta)
+    obj <- fmap (("nick", nick) :) $ forM nonLewds $ \(x, xs) -> do
         n <- liftIO $ randomRIO (0, length xs - 1)
         return $ (x, xs !! n)
-    let lewds' = fromJust $ lookup "lewds" (parse lewds) <|> Just []
+    let lewds' = fromJust $ lookup "lewds" (parseConf lewds) <|> Just []
     ln <- liftIO $ randomRIO (0, length lewds' - 1)
-    if null lewds'
-        then return EmptyMsg
-        else return . UserMsg $ (lewds' !! ln) % obj
+    case () of
+      _ | null lewds' -> return EmptyMsg
+        | n > 1 -> do
+            nlewd <- fmap fromMsg $ lewd args (show $ n - 1)
+            return . UserMsg $ unwords [((lewds' !! ln) % obj), nlewd]
+        | otherwise -> return . UserMsg $ (lewds' !! ln) % obj
+
+-- Credit for this goes to whoever on Rizon created it.
+-- | Sage a user.
+sage :: [String] -> String -> Memory (Message String)
+sage args str = do
+    meta <- asks getMeta
+    let server = getServer meta
+        snick = getUsernick meta
+        shost = getHostname meta
+    sagepath <- asks (sagePathC . getConfig)
+    msagerss <- fmap (map maybeRead . lines) . liftIO $ readFile $ sagepath ++ "rs"
+    let cstr = strip str
+        sagerss :: [Sages]
+        sagerss = map fromJust $ filter (/= Nothing) msagerss
+        f :: Sages -> Bool
+        f (Sages s _) = s `insEq` server
+        msagers :: Maybe Sages
+        nsagerss :: [Sages]
+        (msagers, nsagerss)  = getWithList f sagerss
+        sagers :: Sages
+        sagers = fromJust $ msagers <?> Just (Sages server [])
+        msager :: Maybe (String, String, Int, Double)
+        nsagers :: [(String, String, Int, Double)]
+        (msager, nsagers) = getWithList (insEq cstr . fst4) $ getSagers sagers
+        g x = snd4 x == shost || fst4 x `insEq` snick
+        (smsager, snsagers) = getWithList g $ nsagers
+        userlist :: [String]
+        userlist = getUserlist meta
+        mnick :: Maybe String
+        mnick = fst $ getWithList (insEq cstr) userlist
+        jnick = fromJust $ mnick <?> Just []
+        (nick', host, ns, to) = fromJust $ msager <?> Just (jnick, "", 0, 0.0)
+        (snick', shost', sns, sto) = fromJust $ smsager <?> Just (snick, "", 0, 0.0)
+    time <- fmap realToFrac . liftIO $ getPOSIXTime
+    let ntime = time + 30
+    case mnick of
+        _ | snick `insEq` cstr || host == shost ->
+                return $ UserMsg "You can't sage yourself."
+          | sto > time -> return $ UserMsg "You can't sage too frequently."
+        Just nick -> do
+            let ns' = ns + 1
+                sager' = (nick', host, ns', to)
+                ssager' = if null shost'
+                    then (snick', shost, sns, ntime)
+                    else (snick', shost', sns, ntime)
+                sagers' = sager' : ssager' : snsagers
+                sagerss' = Sages server sagers' : nsagerss
+                isDoubles x = elem x $ takeWhile (<= x) $ do
+                    x <- [0, 100 .. ]
+                    y <- [11, 22 .. 99]
+                    return $ x + y
+                count = case ns' of
+                    _ | isDoubles ns' -> unwords [ show ns' ++ " times."
+                                                 , "Check the doubles on this cunt."
+                                                 ]
+                      | ns' >= 144 -> unwords [ show ns' ++ " times."
+                                              , "Request gline immediately."
+                                              ]
+                      | ns' >= 72 -> unwords [ show ns' ++ " times."
+                                             , "Fuck this guy."
+                                             ]
+                      | ns' >= 36 -> unwords [ show ns' ++ " times."
+                                             , "Someone ban this guy."
+                                             ]
+                      | ns' >= 18 -> unwords [ show ns' ++ " times."
+                                             , "What a faggot..."
+                                             ]
+                      | ns' >= 9 -> unwords [ show ns' ++ " times."
+                                             , "Kick this guy already."
+                                             ]
+                      | ns' >= 3 -> unwords [ show ns' ++ " times."
+                                            , "This guy is getting on my nerves..."
+                                            ]
+                      | ns' > 1 -> show ns' ++ " times. What a bro."
+                      | ns' > 0 -> show ns' ++ " time. What a bro."
+            liftIO $ safeWriteFile (sagepath ++ "rs") $ unlines $ map show sagerss'
+            return $ ChannelMsg $ unwords [ nick'
+                                          , "has been \US\ETX12SAGED\ETX\US"
+                                          , count ]
+        Nothing -> do
+            return $ UserMsg $ cstr ++ " is not in the channel."
 
 -- | Recent manga releases and searching function.
 manga :: [String] -> String -> Memory (Message String)
@@ -421,17 +532,14 @@ manga cargs str = do
             if length cargs > 1
                 then fmap fst . listToMaybe . reads $ cargs !! 1
                 else Just 10
-        amount =
-            if maybeAmount /= Nothing
-                then fromJust maybeAmount 
-                else 10
+        amount = fromMaybe 10 maybeAmount
         mangas = take amount $ genMangas elems'
-    return . ChannelMsg $ joinUntil ", " mangas 400
+    return . ChannelMsg $ joinUntil 400 ", " mangas
 
 -- | Pick a random choice or number.
 random :: [String] -> String -> Memory (Message String)
 random args str
-    | isNum str = do
+    | isDigits str = do
         n <- liftIO (randomRIO (0, read str :: Integer))
         return . ChannelMsg $ show n
     | otherwise = do
@@ -459,7 +567,7 @@ title str = do
     let headers = respHeaders response
         contentTypeResp = headers `tupleListGet` "Content-Type"
         contentResp = respBody response
-    if (take 9 . strip) contentTypeResp == "text/html" then do
+    if "text/html" `isInfixOf` strip contentTypeResp then do
         let maybeElems = parseXMLDoc contentResp
             elems = if isNothing maybeElems
                         then Element (QName "" Nothing Nothing) [] [] Nothing
@@ -467,7 +575,7 @@ title str = do
             getTitle :: [Element]
             getTitle = filterElements ((== "title") . qName . elName) elems
             special = let f = fromJust $ specialElem <|> Just (\_ -> [])
-                      in (`cutoff` 200) . (++ " ") . elemsText . head' $ f elems
+                      in (cutoff 200) . (++ " ") . elemsText . head' $ f elems
             pagetitle = ((special ++ " ") ++) . unwords . map elemsText $ getTitle
         return . ChannelMsg . istrip . replace "\n" " " $ pagetitle
     else do
@@ -494,7 +602,7 @@ isup _ str = do
     title' <- fmap fromMsg $ title url
     return . ChannelMsg . replace "Huh" "Nyaa" . unwords . take 4 . words $ title'
 
--- TODO: Replace with Microsoft Translate -- U FRUSTRATED U FRUSTRATED GOOGLE Y U SO MAAAAAAAAAAAAAAAAAAD
+-- U FRUSTRATED U FRUSTRATED GOOGLE Y U SO MAAAAAAAAAAAAAAAAAAD
 -- | Translate text to another language.
 -- This does not work.
 translate :: [String] -> String -> Memory (Message String)
@@ -555,7 +663,7 @@ variable2 args str = do
             mvar = listToMaybe $ do
                 v <- svars
                 let mvars = maybeRead v
-                guard $ mvars /= Nothing
+                guard $ isJust mvars
                 let var = fromJust mvars
                 guard $ readableVar server dest nick' varname var
                 guard $ if isGlobal then isGlobalVar var else True
@@ -581,7 +689,7 @@ variable2 args str = do
             !mvar = do
                 v <- svars
                 let mvars = maybeRead v
-                guard $ mvars /= Nothing
+                guard $ isJust mvars
                 let var = fromJust mvars
                 guard . not $ writableVar server dest nick' varname var
                 return $ show var
@@ -590,6 +698,484 @@ variable2 args str = do
             hClose h
             writeFile varPath $ unlines vars
         return EmptyMsg
+
+variable3 :: [String] -> String -> Memory (Message String)
+variable3 args str = return EmptyMsg
+
+-- | Battle yuri function.
+yuri :: [String] -> String -> Memory (Message String)
+yuri args str = do
+    debug <- asks (verbosityC . getConfig)
+    meta <- asks getMeta
+    let serverurl = getServer meta
+        dest = getDestino meta
+        userlist = getUserlist meta
+        cstr = strip str
+        margs = listToMaybe args
+    yuripath <- asks $ yuriPathC . getConfig
+    mphrases <- fmap maybeRead . liftIO . readFile $ yuripath ++ " actions"
+    myuriss <- fmap (map maybeRead . lines) . liftIO . readFile $ yuripath ++ " yuris"
+    let nick1 = getUsernick meta
+        host1 = getHostname meta
+        fighters = map strip $ split "<|>" str
+        yuriphrases :: [YuriAction]
+        yuriphrases = fromJust $ mphrases <?> Just []
+        yuriss :: [Yuris]
+        yuriss = map fromJust $ filter (/= Nothing) myuriss
+        myuris :: Maybe Yuris
+        nyuriss :: [Yuris]
+        (myuris, nyuriss) = getWithList (isYuris serverurl dest) yuriss
+        yuris :: Yuris
+        yuris = fromJust $ myuris <?> Just (Yuris serverurl dest [])
+        owners :: [YuriOwner]
+        owners = yuriOwners yuris
+        mowner :: Maybe YuriOwner
+        nowners :: [YuriOwner]
+        (mowner, nowners) = getWithList (isOwner nick1) $ owners
+        owner :: YuriOwner
+        owner = fromJust $ mowner <?> Just (YuriOwner nick1 host1 0 [])
+        globalExists x =
+            any (any (insEq x . yuriName) . ownerYuris) $ yuriOwners yuris
+        ownerExists x =
+            any ((insEq x) . yuriName) $ ownerYuris owner
+    time <- liftIO $ fmap realToFrac getPOSIXTime
+    let ntime = time + 9 * 60
+        remtime = ceiling (ownerTime owner - time)
+        (mintime, sectime) = remtime `divMod` 60
+        timestr = case () of
+          _ | mintime == 0 -> show sectime ++ " second(s)."
+            | sectime == 0 -> show mintime ++ " minute(s)."
+            | otherwise -> unwords [ show mintime
+                                   , "minute(s) and"
+                                   , show sectime
+                                   , "second(s)." ]
+        timeoutMsg = UserMsg $ unwords [ "Please wait"
+                                       , timestr ]
+    case margs of
+      _ | any (== Nothing) myuriss -> do
+            when (debug > 0) . liftIO $ do
+                print $ length $ filter (== Nothing) myuriss
+            return $ ChannelMsg $ "An error occurred (%s actions)" % yuripath
+        | "fight" `maybeInsEq` margs -> case () of
+          _ | time < ownerTime owner -> return timeoutMsg
+            | length fighters < 2 -> do
+                return $ UserMsg $ unwords [
+                      "Incorrect syntax."
+                    , ".yuri:fight [yuri name] <|> [opponent yuri]"
+                    ]
+            | not . all (globalExists . strip) $ fighters -> do
+                let yuri1 = strip $ fighters !! 0
+                    yuri2 = strip $ fighters !! 1
+                case () of
+                  _ | not $ globalExists yuri1 ->
+                        return $ UserMsg $ yuri1 ++ " doesn't exist."
+                    | not $ globalExists yuri2 ->
+                        return $ UserMsg $ yuri2 ++ " doesn't exist."
+                    | otherwise ->
+                        return $ UserMsg "Everything exploded in your face."
+            | length yuriphrases - 1 < 0 -> do
+                when (debug > 0) . liftIO $ do
+                    putStrLn $ unwords [ "There is most likely an error with"
+                                       , "your `" ++ yuripath ++ " actions' file."
+                                       ]
+                return $ ChannelMsg "An error occurred (fight)."
+            | otherwise -> do
+                let yuri1n = strip $ fighters !! 0
+                    yuri2n = strip $ fighters !! 1
+                    oyuris = ownerYuris owner
+                    (moyuri, onyuris) = getWithList (insEq yuri1n . yuriName) oyuris
+                    oyuri = fromJust $ moyuri <?> Just (Yuri [] "" Nothing (0,0,0))
+                    (meowner, enowner) = getWithList (any (insEq yuri2n . yuriName) . ownerYuris) owners
+                    eowner = fromJust $ meowner <?> Just (YuriOwner [] [] 0 [])
+                    enick = ownerName eowner
+                    ehost = ownerHost eowner
+                    etime = ownerTime eowner
+                    eyuris = ownerYuris eowner
+                    (meyuri, enyuris) = getWithList (insEq yuri2n . yuriName) eyuris
+                    eyuri = fromJust $ meyuri <?> Just (Yuri [] "" Nothing (0,0,0))
+                    woystats = yuriStats oyuri `applyWep` yuriWeapon oyuri
+                    weystats = yuriStats eyuri `applyWep` yuriWeapon eyuri
+                    (moe1, lewd1, str1) =
+                        woystats `statsMinus` weystats
+                    (moe2, lewd2, str2) =
+                        weystats `statsMinus` woystats
+                    phrases = filter (not . (`insElem` ["steal", "esteal"]) . actionName) yuriphrases
+                    omoephs =
+                        take moe1 . safeCycle $ filter (insEq "moe" . actionName) phrases
+                    olewdphs =
+                        take lewd1 . safeCycle $ filter (insEq "lewd" . actionName) phrases
+                    ostrphs =
+                        take str1 . safeCycle $ filter (insEq "str" . actionName) phrases
+                    emoephs =
+                        take moe2 . safeCycle $ filter (insEq "emoe" . actionName) phrases
+                    elewdphs =
+                        take lewd2 . safeCycle $ filter (insEq "elewd" . actionName) phrases
+                    estrphs =
+                        take str2 . safeCycle $ filter (insEq "estr" . actionName) phrases
+                    newphs = concat [ omoephs
+                                    , olewdphs
+                                    , ostrphs
+                                    , emoephs
+                                    , elewdphs
+                                    , estrphs
+                                    , phrases
+                                    ]
+                    ostealphs =
+                        let f | length oyuris < 6 =
+                                (insEq "steal" . actionName)
+                              | otherwise = \_ -> False
+                            amount = (moe1 + lewd1 + str1) `div` 4
+                        in take amount . safeCycle $ filter f yuriphrases
+                    estealphs =
+                        let f | length eyuris < 6 =
+                                (insEq "esteal" . actionName)
+                              | otherwise = \_ -> False
+                            amount = (moe2 + lewd2 + str2) `div` 4
+                        in take amount . safeCycle $ filter f yuriphrases
+                    stealphs =
+                        let f | length oyuris < 6 && length eyuris < 6 =
+                                ((`insElem` ["steal", "esteal"]) . actionName)
+                              | length oyuris < 6 =
+                                (insEq "steal" . actionName)
+                              | length eyuris < 6 =
+                                (insEq "esteal" . actionName)
+                              | otherwise = (\_ -> False)
+                        in filter f yuriphrases
+                    finalphs = concat [ostealphs, estealphs, stealphs, newphs]
+                    stats = totalStats oyuri - totalStats eyuri
+                n <- liftIO $ randomRIO (0, length finalphs - 1)
+                when (debug > 1) . liftIO $ do
+                    putStrLn $ unlines [ unwords [ "Moe phs:"
+                                                 , show (length omoephs)
+                                                 , "+"
+                                                 , show (length emoephs)
+                                                 , "/"
+                                                 , show (length finalphs)
+                                                 ]
+                                       , unwords [ "Lewd phs:"
+                                                 , show (length olewdphs)
+                                                 , "+"
+                                                 , show (length elewdphs)
+                                                 , "/"
+                                                 , show (length finalphs)
+                                                 ]
+                                       , unwords [ "Str phs:"
+                                                 , show (length ostrphs)
+                                                 , "+"
+                                                 , show (length estrphs)
+                                                 , "/"
+                                                 , show (length finalphs)
+                                                 ]
+                                       , unwords [ "Steal phs:"
+                                                 , show (length stealphs)
+                                                 , "+"
+                                                 , show (length ostealphs)
+                                                 , "+"
+                                                 , show (length estealphs)
+                                                 , "/"
+                                                 , show (length finalphs)
+                                                 ]
+                                       , unwords [ "Yuri1 vs Yuri2:"
+                                                 , show woystats
+                                                 , "vs"
+                                                 , show weystats
+                                                 ]
+                                       ]
+                case () of
+                  _ | yuriName oyuri == [] -> do
+                        return $ UserMsg $ unwords [ yuriName oyuri
+                                                   , "isn't owned by you."
+                                                   ]
+                    -- what the hell is this
+                    | n < 0 || n >= length finalphs -> do
+                        liftIO $ do
+                            putStrLn $ "N: " ++ show n
+                            putStrLn $ "Len phs: " ++ show (length finalphs)
+                        return $ EmptyMsg
+                    --
+                    | stats `notElem` [-10 .. 10] -> do
+                        let status | stats > 10 = "too high"
+                                   | stats < (-10) = "too low"
+                            name = yuriName eyuri
+                        return $ UserMsg $ unwords [ yuriName oyuri ++ "'s"
+                                                   , "stats are %s" % status
+                                                   , "to fight %s." % name
+                                                   , "Max 10 stat difference."
+                                                   ]
+                    | otherwise -> do
+                        let mphrase = finalphs !! n
+                            msgs = actionMsgs mphrase
+                            yuri1s = yuriName oyuri
+                            yuri2s = yuriName eyuri
+                            yimg1 = " <" >|< yuriImage oyuri >|< ">"
+                            yimg2 = " <" >|< yuriImage eyuri >|< ">"
+                            lewdnick = if isPrefixOf "E" $ actionName mphrase
+                                then yuri2s
+                                else yuri1s
+                        n' <- liftIO $ randomRIO (0, length msgs - 1)
+                        lewdmsg <- fmap fromMsg $ lewd [lewdnick] ""
+                        let stats1 = actionYuri1 mphrase
+                            stats2 = actionYuri2 mphrase
+                            obj = [ ("yuri1", yuri1s)
+                                  , ("yuri2", yuri2s)
+                                  , ("nick1", nick1)
+                                  , ("nick2", enick)
+                                  , ("img1", yimg1)
+                                  , ("img2", yimg2)
+                                  , ("lewd", lewdmsg)
+                                  ]
+                            msg = (msgs !! n') % obj
+                            oyuri' = applyStats stats1 oyuri
+                            eyuri' = applyStats stats2 eyuri
+                            oyuris' = case actionName mphrase of
+                                "Steal" -> eyuri' : oyuri' : onyuris
+                                "ESteal" -> onyuris
+                                _ -> oyuri' : onyuris
+                            eyuris' = case actionName mphrase of
+                                "Steal" -> enyuris
+                                "ESteal" -> oyuri' : eyuri' : enyuris
+                                _ -> eyuri' : enyuris
+                            owner' = YuriOwner nick1 host1 ntime oyuris'
+                            eowner' = YuriOwner enick ehost etime eyuris'
+                            nowners' = filter ((/= enick) . ownerName) nowners
+                            owners' = owner' : eowner' : nowners'
+                            yuris' = addOwners yuris owners'
+                            yuriss' = yuris' : nyuriss
+                        case () of
+                          _ | enick `insEq` nick1 -> do
+                                return $ UserMsg "You can't fight your own yuri!"
+                            | otherwise -> do
+                                writeYuriss yuriss'
+                                return $ ChannelMsg msg
+        | "spawn" `maybeInsEq` margs -> case () of
+          _ | time < ownerTime owner -> return timeoutMsg
+            | otherwise -> do
+                let poorest = sortBy (comparing (length . ownerYuris)) owners
+                    poorest' = let f g x y = (g x, g y)
+                                   g x y = uncurry (<=) $ f (length . ownerYuris) x y
+                               in map ownerName $ takeWhileOrd g poorest
+                    userlist' = filter (`elem` userlist) poorest' <?> userlist
+                n <- liftIO $ randomRIO (0, length userlist' - 1)
+                let rnick = userlist' !! n
+                    (mo', no') = getWithList (isOwner rnick) owners
+                    (_, no'') = getWithList (isOwner nick1) no'
+                    o' = fromJust $ mo' <?> Just (YuriOwner rnick [] 0 [])
+                    (name' : img : _) = (fighters <?> [cstr, ""]) ++ [""]
+                    yurixs = Yuri name' img Nothing (0, 0, 0) : ownerYuris o'
+                    otime = ownerTime o'
+                    ohost = ownerHost o'
+                    owner' = YuriOwner rnick ohost otime yurixs
+                    myowner = ownerModTime owner ntime
+                    twowners = if rnick == nick1
+                        then [YuriOwner rnick ohost ntime yurixs]
+                        else [owner', myowner]
+                    yuris' = addOwners yuris $ twowners ++ no''
+                    yuriss = yuris' : nyuriss
+                case () of
+                  _ | globalExists name' ->
+                        return $ UserMsg $ name' ++ " already exists."
+                    | null img -> do
+                        return $ UserMsg $ unwords [ "Image URL required."
+                                                   , ":spawn yuri name"
+                                                   , "<|>"
+                                                   , "image URL"
+                                                   ]
+                    | length name' > 60 -> do
+                        return $ UserMsg "Name is too long. 60 chars is max."
+                    | length img > 37 -> do
+                        return $ UserMsg "Image URL too long. 37 chars is max."
+                    | length yurixs <= 6 -> do
+                        writeYuriss yuriss
+                        return $ ChannelMsg $ unwords [ name'
+                                                      , "<" ++ img ++ ">"
+                                                      , "was given to"
+                                                      , rnick ++ "." ]
+                    | length yurixs >= 6 -> do
+                        return $ UserMsg $ unwords [ rnick
+                                                   , "has too many yuri."
+                                                   , "Six is max."
+                                                   ]
+                    | otherwise -> return $ ChannelMsg $ "An error occurred (spawn)."
+        | "find" `maybeInsEq` margs -> do
+        let matcher f xs = do
+                owner' <- xs
+                let yuris = filter f $ ownerYuris owner'
+                    nick' = ownerName owner'
+                guard $ not $ null yuris
+                let mkMatch (Yuri n i w s) = unwords [n, s `showApplyWep` w]
+                    yuris' = intercalate ", " $ map mkMatch yuris
+                return $ unwords [nick', "has", yuris']
+            ematches = matcher (insEq cstr . yuriName) owners
+            pmatches = matcher (insIsInfixOf cstr . yuriName) owners
+            matches = joinUntil 400 "; " . (ematches ++) $ do
+                x <- pmatches
+                guard $ x `notElem` ematches
+                return x
+        case matches of
+            [] -> return $ UserMsg $ "No matches against `" ++ cstr ++ "'."
+            _ -> return $ ChannelMsg $ matches
+        | "list" `maybeInsEq` margs -> do
+        let nick' = if null cstr then nick1 else cstr
+            mowner' = fst . getWithList ((insEq nick') . ownerName) $ owners
+            noyuris = if nick' `insEq` nick1
+                then "You don't have any Yuri!"
+                else nick' ++ " doesn't have any Yuri!"
+        case mowner' of
+            Just owner' -> do
+                let stats :: Yuri -> String
+                    stats hyu@(Yuri n i w s) = unwords [ n, showWep hyu]
+                    yurisstr = intercalate ", " $ map stats $ ownerYuris owner'
+                if null yurisstr then do
+                    return $ UserMsg $ noyuris
+                else return $ ChannelMsg yurisstr
+            Nothing -> return $ UserMsg $ noyuris
+        | "drop" `maybeInsEq` margs -> case () of
+          _ | not $ ownerExists cstr -> do
+                return $ UserMsg $ cstr ++ " doesn't exist."
+            | otherwise -> do
+                let yurixs = filter (not . insEq cstr . yuriName) $ ownerYuris owner
+                    owner' = YuriOwner nick1 host1 ntime yurixs
+                    yuris' = addOwners yuris $ owner' : nowners
+                    yuriss = yuris' : nyuriss
+                writeYuriss yuriss
+                return $ ChannelMsg $ unwords [ cstr
+                                              , "was dropped by"
+                                              , nick1 ++ "." ]
+        | "rank" `maybeInsEq` margs -> do
+            let mn = maybeRead . dropWhile (not . isDigit) $ cstr :: Maybe Int
+                jn = fromJust $ mn <?> Just 0
+                moder [] = (>= jn)
+                moder (x:_) | x == '>' = (> jn)
+                            | x == '<' = (< jn)
+                            | x == '=' = (== jn)
+                            | x == '~' = \y -> y > jn - 10 && y < jn + 10
+                            | otherwise = (>= jn)
+                mf = moder $ take 1 cstr
+                yurixs = concatMap ownerYuris owners
+                yurixs' = filter (mf . totalStats) $ case () of
+                  _ | cstr `insElem` ["moe", "fst"] ->
+                        sortBy (comparing (oneStat fst3)) yurixs
+                    | cstr `insElem` ["lewd", "snd", "lewdness"] ->
+                        sortBy (comparing (oneStat snd3)) yurixs
+                    | cstr `insElem` ["str", "trd", "strength"] ->
+                        sortBy (comparing (oneStat trd3)) yurixs
+                    | cstr `insElem` ["min", "weak"] ->
+                        reverse $ sortBy (comparing totalStats) yurixs
+                    | otherwise ->
+                        sortBy (comparing totalStats) yurixs
+                yren y = unwords [ yuriName y
+                                 , yuriStats y `showApplyWep` yuriWeapon y
+                                 ]
+                yurixstr =
+                    joinUntil 400 ", " . take 15 . reverse $ map yren yurixs'
+            return $ ChannelMsg yurixstr
+        | "wgive" `maybeInsEq` margs -> do
+            let (name : wep : _) = (fighters <?> [cstr, ""]) ++ [""]
+                oyuris = ownerYuris owner
+                (myuri, nyuris) = getWithList (insEq name . yuriName) oyuris
+                fyuri = listToMaybe $ do
+                    o <- owners
+                    let mm = fst $ getWithList (insEq name . yuriName) $ ownerYuris o
+                    guard $ isJust mm
+                    return $ fromJust mm
+                yuri = fromJust $ myuri <?> fyuri <?> Just (Yuri "" "" Nothing (0,0,0))
+            amn <- liftIO $ randomRIO (0, 2)
+            let (rmoe : rlewd : rstr : _) = case () of
+                  _ | isNothing (yuriWeapon yuri) || not (null wep) ->
+                        take 3 . drop amn $ cycle [0, 0, 1]
+                    | otherwise -> getBonusStat $ yuriWeapon yuri
+                chance = 2 ^ getWeaponStat (yuriWeapon yuri)
+            mwn <- liftIO $ randomRIO (1, chance)
+            let isWin = 0 == [0 .. chance - 1] !! (mwn - 1)
+                newstats =
+                    let (x, y, z) = getWepStats $ yuriWeapon yuri
+                    in (x + rmoe, y + rlewd, z + rstr)
+                wep' = wep <?> wepName (yuriWeapon yuri)
+                weapon = if isWin
+                    then Just (wep', newstats)
+                    else Just (wep', getWepStats $ yuriWeapon yuri)
+            case () of
+              _ | time < ownerTime owner -> do
+                    return timeoutMsg
+                | null $ yuriName yuri -> do
+                    return $ UserMsg $ name ++ " doesn't exist."
+                | not $ ownerExists name -> do
+                    return $ UserMsg $ "You don't own " ++ name ++ "."
+                | otherwise -> do
+                    let (Yuri name' img' _ stats') = yuri
+                        yuri' :: Yuri
+                        yuri' = Yuri name' img' weapon stats'
+                        yurixs :: [Yuri]
+                        yurixs = yuri' : nyuris
+                        owner' :: YuriOwner
+                        owner' = YuriOwner nick1 host1 ntime yurixs
+                        owners' :: [YuriOwner]
+                        owners' = owner' : nowners
+                        yuris' :: Yuris
+                        yuris' = addOwners yuris $ owners'
+                        yuriss :: [Yuris]
+                        yuriss = yuris' : nyuriss
+                        sta = if isWin then "succeeded" else "failed"
+                        msg = if null wep
+                            then "Weapon upgrade %s!" % sta
+                            else "%s was given to %s." % [wep', yuriName yuri']
+                    liftIO $ do
+                        putStrLn $ concat ["Chance: 1 / ", show chance]
+                    writeYuriss yuriss
+                    return $ ChannelMsg $ unwords [ "Weapon upgrade %s!" % sta
+                                                  , yuriName yuri'
+                                                  , showWep yuri'
+                                                  ]
+        | "look" `maybeInsEq` margs -> do
+            let (name : img : _) = (fighters <?> [cstr, ""]) ++ [""]
+                oyuris = ownerYuris owner
+                (myuri, nyuris) = getWithList (insEq name . yuriName) oyuris
+                fyuri = listToMaybe $ do
+                    o <- owners
+                    let mm = fst $ getWithList (insEq name . yuriName) $ ownerYuris o
+                    guard $ isJust mm
+                    return $ fromJust mm
+                yuri = fromJust $ myuri <?> fyuri <?> Just (Yuri "" "" Nothing (0,0,0))
+            case () of
+              _ | null $ yuriName yuri -> do
+                    return $ UserMsg $ name ++ " doesn't exist."
+                | length img > 37 -> do
+                    return $ UserMsg "Image URL is too long. 37 chars is max."
+                | null img -> do
+                    return $ ChannelMsg $ unwords [
+                          yuriName yuri
+                        , show (yuriStats yuri)
+                        , yuriImage yuri
+                        ]
+                | not $ ownerExists name -> do
+                    return $ UserMsg $ "You don't own " ++ name ++ "."
+                | otherwise -> do
+                    let (Yuri name' _ wep' stats') = yuri
+                        yuri' :: Yuri
+                        yuri' = Yuri name' img wep' stats'
+                        yurixs :: [Yuri]
+                        yurixs = yuri' : nyuris
+                        owner' :: YuriOwner
+                        owner' = YuriOwner nick1 host1 (ownerTime owner) yurixs
+                        owners' :: [YuriOwner]
+                        owners' = owner' : nowners
+                        yuris' :: Yuris
+                        yuris' = addOwners yuris $ owners'
+                        yuriss :: [Yuris]
+                        yuriss = yuris' : nyuriss
+                    writeYuriss yuriss
+                    return EmptyMsg
+      _ -> return $ UserMsg $ unwords [
+              "Please give an argument like:"
+            , ":fight yuri name <|> opponent yuri,"
+            , ":spawn yuri name <|> image URL,"
+            , ":find yuri name,"
+            , ":list [IRC nick],"
+            , ":drop yuri name,"
+            , ":rank [stat name],"
+            , ":wgive yuri name [<|> weapon name],"
+            , ":look yuri name [<|> Yuri image URL],"
+            ]
 
 -- TODO: Store last location.
 -- | Weather printing function.
@@ -630,7 +1216,7 @@ wiki args s = do
         text = strip $ elemsText . fromMaybeElement $ search <|> intro
     if null text
         then return EmptyMsg
-        else return . ChannelMsg . (`cutoff` 400) $ text
+        else return . ChannelMsg . (cutoff 400) $ text
 
 -------------------------------------------------------------------------------
 -- Non-IRC bot functions / event functions ------------------------------------
@@ -640,4 +1226,4 @@ diff :: [String] -> Memory String
 diff xs = do
     temp <- asks (getUserlist . getMeta)
     let xs' = filter (not . (`elem` temp)) xs
-    return $ joinUntil ", " xs' 400
+    return $ joinUntil 400 ", " xs'

@@ -1,3 +1,4 @@
+
 {-
 A lewd IRC bot that does useless things.
 Copyright (C) 2012 Shou
@@ -16,555 +17,577 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -}
 
-{-# LANGUAGE DoAndIfThenElse #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Main where
 
+-- {{{ imports
+import qualified Config as KC
 
-import Config
-
-import KawaiiBot.Utils
-import KawaiiBot.Types
+import qualified KawaiiBot.Types as KT
+import KawaiiBot.Utils (forkMe)
 
 import Control.Applicative
-import Control.Exception
+import Control.Exception as E
+import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Monad
 import Control.Monad.Reader
-import Control.Concurrent
-import Data.List
+
+import Data.Attoparsec.Text.Lazy (Parser, Result (..))
+import qualified Data.Attoparsec.Text.Lazy as A
+import Data.Map (Map)
+import qualified Data.Map as M
 import Data.Maybe
-import Data.String.Utils (split)
-import Data.Time.Clock.POSIX
+import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.IO as TL
+import Data.Time.Clock.POSIX
+
 import Network
-import System.Directory
+
 import System.IO
+-- }}}
 
+-- TODO
+-- - Several nicks -> Try until works -? None available -> Something
+-- - Several MVars vs One MVar plus try catch reads and puts vs One MVar with a queue of some sort
+-- - Recursing function to check timestamps every second.
+-- - Replace `put' with `pas' which takes a (ServersConfig -> Memory ()) function as an argument and attempts to apply it if it fails.
 
--- TODO:
----- Show client disconnections instantly
----- If an IRC handle is closed, reconnect. Probably need another MVar.
------- Work has been started. Make sure handle actions are within `try' functions.
------- Doesn't reconnect properly.
--------- After the `irc.server.net has timed out' message is sent, handle is closed
--------- and KB reconnects but the IRC server does not respond. pls respond.
----- Additional internal functions available to the clients:
------- `connect irc.freenode.net' to connect to an IRC server. Disconnect too.
------- `getservers' to make it output which IRC servers are connected
------- `getchannels' is necessary for event channel black/whitelisting to work
----- Lower the CPU usage.
------- See: clientsListen
------- CPU usage used to be 0% with `threadDelay 10', see if we can lower it again.
----- JOINs are ignored if sent too early. Wait for the message with status code `001'
------- Status code `001' sometimes not sent? What about `002'?
--- Fix server timeouts. /FIXME
--- Finish the transition to CMemory
+-- XXX
+-- - We can assume that the server exists if invoked from a function that
+--   holds a server. Instead, pass the server. Stop using Map lookups
+--   everywhere.
 
--- Simple function that writes to a handle and prints the bytestring
-write :: Handle -> T.Text -> IO ()
-write h bs = do
-    T.hPutStrLn h bs
-    T.putStrLn ('>' `T.cons` bs)
+-- {{{ data
+data IRCMsg = Privmsg User Text Text
+            -- ^ Privmsg User Destination Message
+            | Join User Text
+            -- ^ Join User Destination
+            | Part User Text Text
+            -- ^ Part User Destination Message
+            | Kick User Text Text Text
+            -- ^ Kick User Destination Nick Message
+            | Nick User Text
+            -- ^ Nick User Nick
+            | Quit User Text
+            -- ^ Quit User Message
+            | Invite User Text Text
+            -- ^ Invite User 
+            | Userlist Text [Text]
+            -- ^ Userlist Destination [Nick]
+            | Ping Text
+            -- ^ Ping Message
+            | Pong Text
+            -- ^ Pong Message
+            | Welcome
+            -- ^ Welcome message. Join channels here.
+            | VoidIRCMsg
+            deriving (Show)
 
-clientWrite :: CClient -> T.Text -> CMemory ()
-clientWrite c@(clientHost, clientHandle) line = do
-    clientsMVar' <- asks (clientsMVar . getcMVars)
-    let put :: CMemory (Either SomeException ())
-        put = io $ try (T.hPutStrLn clientHandle line)
-    e <- put
-    case e of
-        Right _ -> return ()
-        Left _ -> do
-            let f c'@(clientHost', clientHandle') = if c == c'
-                    then hClose clientHandle >> return False
-                    else return True
-            io . modifyMVar_ clientsMVar' $ filterM f
+data ClientMsg = ServerWrite Text Text
+               -- ^ ServerWrite Server Message
+               | GetUserlist Text Text
+               -- ^ GetUserlist Server Channel
+               | VoidClientMsg
+               deriving (Show)
 
--- | Write to all open client handles
-clientsWrite :: T.Text -> CMemory ()
-clientsWrite line = do
-    debug <- asks (verbosityC . getcConfig)
-    mvar <- asks (clientsMVar . getcMVars)
-    when (debug > 1) . io $ putStrLn "clientsWrite init..."
-    hs <- io $ takeMVar mvar
-    when (debug > 1) . io $ putStrLn "clientsWrite after takeMVar"
-    mhs <- forM hs $ \(clientHost, clientHandle) -> do
-        -- check if handle is still open
-        e <- io $ try (T.hPutStrLn clientHandle line >> return clientHandle) :: CMemory (Either SomeException Handle)
-        -- if it didn't return an exception, continue
-        case e of
-            -- return Just the host and handle
-            Right clientHandle' -> return $ Just (clientHost, clientHandle')
-                --`
-            -- print a disconnection message and return Nothing
-            Left _ -> do
-                io (putStrLn (clientHost ++ " has disconnected."))
-                return Nothing
-    io . T.putStrLn $ '>' `T.cons` line
-    let f x acc = if isJust x
-            then fromJust x : acc
-            else acc
-    io . putMVar mvar $ foldr f [] mhs
-  where isJust (Just _) = True
-        isJust _ = False
+data User = User Text Text Text deriving (Show)
 
--- | loop that handles client connections and adds them to the MVar list
-socketlisten :: Socket -> CMemory ()
-socketlisten sock = do
-    clientsMVar' <- asks (clientsMVar . getcMVars)
-    -- accept a socket
-    (clientHandle, clientHost, _) <- io $ accept sock
-    -- set handle character encoding to utf8
-    io $ hSetEncoding clientHandle utf8
-    -- line buffering instead of block buffering
-    io $ hSetBuffering clientHandle LineBuffering
-    -- newline mode to \r\n
-    io $ hSetNewlineMode clientHandle (NewlineMode CRLF CRLF)
-    io $ putStrLn (clientHost ++ " has connected.")
-    -- pass hostname and handle to core
-    io $ modifyMVar_ clientsMVar' $ return . ((clientHost, clientHandle) :)
-    forkMe $ clientRelay (clientHost, clientHandle)
-    -- continue loop
-    socketlisten sock
+-- | IRC server data
+data Server = Server { serverURL :: Text
+                     , serverPort :: PortNumber
+                     , serverNick :: Text
+                     , serverChans :: Map Text [Text]
+                     , serverNSPass :: Text
+                     , serverHandle :: Maybe Handle
+                     , serverTStamp :: Int
+                     , serverRStamp :: Int
+                     } deriving (Show)
 
--- | Send connected servers and channels their userlists to the client
-clientRelay :: CClient -> CMemory ()
-clientRelay c@(clientHost, clientHandle) = do
-    serverMVar' <- asks (serverMVar . getcMVars)
-    servers <- io $ readMVar serverMVar'
-    forM_ servers $ \(CServer u h ms) -> do
-        forM_ ms $ \m -> do
-            let dest = getDestino m
-                userlist = getUserlist m
-                msg = "getuserlist:" ++ unwords [u, dest, unwords userlist]
-            clientWrite c $ T.pack msg
+-- | Socket clients.
+type Client = (Text, Handle)
 
--- |
-clientsListen :: [CClient] -> CMemory ()
-clientsListen oldSockHs = do
-    timeMVar' <- asks (timeMVar . getcMVars)
-    clientsMVar' <- asks (clientsMVar . getcMVars)
-    textMVar' <- asks (textMVar . getcMVars)
-    debug <- asks (verbosityC . getcConfig)
-    oldSockHs' <- io $ readMVar clientsMVar'
-    forM_ (filter (`notElem` oldSockHs) oldSockHs') $ \h -> do
-        forkMe $ clientLoop h
-    times <- io $ readMVar timeMVar'
-    time <- io $ fmap floor getPOSIXTime
-    forM_ times $ \(server, tstamp) -> when (time - tstamp > 240) $ do
-        when (debug > 0) $ io $ do
-            putStrLn (server ++ " has timed out")
-        removeServer server
-        rejoinServer server
-    ts <- io $ swapMVar textMVar' []
-    forM_ ts handleMsg
-    io $ threadDelay (10^4)
-    clientsListen oldSockHs'
+-- | Last modified timestamp, list of `Client's.
+type Clients = (Int, [Client])
 
--- TODO: Split this into blocks or something
--- TODO: Respond only to the client requesting the information?
--- | Respond to a core message or pass on an IRC message
-handleMsg :: CMessage -> CMemory ()
-handleMsg (clientHost, clientText) = do
-    debug <- asks (verbosityC . getcConfig)
-    servers <- asks (serversC . getcConfig)
-    clientsMVar' <- asks (clientsMVar . getcMVars)
-    serverMVar' <- asks (serverMVar . getcMVars)
-    timeMVar' <- asks (timeMVar . getcMVars)
-    ircHandles <- io $ readMVar serverMVar'
-    clients <- io $ readMVar clientsMVar'
-    let (action, message) = split1 ':' clientText
-        send :: Handle -> T.Text -> CMemory (Either SomeException ())
-        send h x = io . try $ T.hPutStrLn h x
-        cm = listToMaybe $ do
-            c@(host, handle) <- clients
-            guard $ host == clientHost
-            return c
-    when (debug > 1) . io . putStrLn $ T.unpack action ++ " == " ++ show ircHandles
-    if T.unpack action `elem` map getcServerURL ircHandles then do
-        when (debug > 1) . io $ putStrLn "It's an IRC message."
-        forM_ ircHandles $ \(CServer server handle' metas) -> do
-            when (T.pack server == action) $ do
-                e <- send handle' message
-                case e of
-                    Right _ -> do
-                        when (debug > 1) . io $ putStrLn "Successfully sent!"
-                        time <- io $ fmap floor getPOSIXTime
-                        io $ modifyMVar_ timeMVar' $ return . tupleInject (server, time)
-                    Left e' -> when (debug > 0) . io $ print e'
-    else if cm /= Nothing then do
-        let c = fromJust cm
-        when (debug > 1) $ io $ putStrLn "It's a Core message."
-        case T.unpack action of
-            -- getnick server
-            "getnick" -> do
-                let server = T.unpack message
-                    ownnick = fmap serverNick $ server `getByServerURL` servers
-                case ownnick of
-                    Just nick -> do
-                        clientWrite c . T.pack $ "getnick:" ++  unwords [server, nick]
-                    Nothing -> do
-                        when (debug > 1) . io $ do
-                            putStrLn $ server ++ " not in servers"
-            -- "getuserlist server channel
-            "getuserlist" -> do
-                let msgs = split " " $ T.unpack message
-                if length msgs >= 2 then do
-                    let (server : channel : xs) = msgs
-                        musers = listToMaybe $ do
-                            (CServer u h ms) <- ircHandles
-                            guard $ server == u
-                            return $ do
-                                m <- ms
-                                guard $ getDestino m == channel
-                                getUserlist m
-                        jusers = fromJust $ musers <|> Just []
-                        users = unwords [ "getuserlist:" ++ server
-                                        , channel
-                                        , unwords jusers
-                                        ]
-                    clientWrite c $ T.pack users
-                else when (debug > 0) . io $ do
-                        putStrLn $ T.unpack action ++ ": Not enough arguments"
-            -- getservers
-            "getservers" -> do
-                let servs = unwords $ map getcServerURL ircHandles
-                    servs' = "getservers:" ++ servs
-                clientWrite c $ T.pack servs'
-            -- quitserver server
-            "quitserver" -> removeServer . istrip $ T.unpack message
-            -- joinserver server port nick channel1 channel2 ...
-            "joinserver" -> do
-                let msgs = split " " $ T.unpack message
-                if length msgs >= 3 then do
-                    let (server : port : nick : xs) = msgs
-                        port' = if isNum port
-                                    then read port :: Int
-                                    else 6667
-                        fallbacks = Just $ dServer { serverURL = server
-                                                   , serverPort = port'
-                                                   , serverNick = nick
-                                                   , serverChans = xs
-                                                   , serverNSPass = ""
-                                                   }
-                        server' = fromJust $
-                            (server `getByServerURL` servers) <|> fallbacks
-                    when (debug > 1) . io $ do
-                        putStrLn $ "handleMsg joinserver " ++ serverURL server'
-                    cserver <- io $ ircc server'
-                    io $ modifyMVar_ serverMVar' (return . (cserver:))
-                    ircListen cserver
-                else when (debug > 0) . io $ do
-                        putStrLn $ T.unpack action ++ " :Not enough arguments"
-            _ -> io $ print $ '<' `T.cons` clientText
-    else return ()
+data ServersConfig = ServersConfig { serversC :: Map Text Server
+                                   , clientsC :: Clients
+                                   , verbosityC :: Int
+                                   } deriving (Show)
 
-split1 :: Char -> T.Text -> (T.Text, T.Text)
-split1 c t =
-    let f = (\(bool, (start, end)) x -> if bool
-        then if x == c
-            then (False, (start, end))
-            else (bool, (start `T.snoc` x, end))
-        else (bool, (start, end `T.snoc` x)))
-    in snd $ T.foldl f (True, (T.empty, T.empty)) t
+type ConfigMVar = TMVar ServersConfig
 
-elemfst :: Eq a => a -> [(a, b)] -> Bool
-elemfst _ [] = False
-elemfst a ((x,_):xs) = if a == x then True else elemfst a xs
+type Memory = ReaderT ConfigMVar IO
+-- }}}
 
--- Initialization for clientsLoop which loops clientsListen
-clientsInit :: CMemory ()
-clientsInit = do
-    clientsMVar' <- asks (clientsMVar . getcMVars)
-    chs <- io $ readMVar clientsMVar'
-    forM_ chs (forkMe . \h -> clientLoop h)
-    clientsListen []
+staticServers :: Map Text Server
+staticServers = foldr serverMapper M.empty $ KT.serversC KC.config
+  where
+    serverMapper x xs = M.insert (T.pack $ KT.serverURL x) (serverToServer x) xs
+    serverToServer (KT.Server port url chans nick nsp _ _ _) =
+        let ur = T.pack url
+            po = fromIntegral port
+            ch = M.fromList $ zip (map T.pack chans) (cycle [[]])
+            ni = T.pack nick
+            ns = T.pack nsp
+        in Server ur po ni ch ns Nothing 0 0
 
-clientLoop :: CClient -- specific client handle to read from
-           -> CMemory ()
-clientLoop ch@(clientHost, clientHandle) = do
-    e <- io $ try (T.hGetLine clientHandle) :: CMemory (Either SomeException T.Text)
-    case e of
-        Right line -> do
-            textMVar' <- asks (textMVar . getcMVars)
-            io $ modifyMVar_ textMVar' (return . ((clientHost, line) :))
-            clientLoop ch
-        Left _ -> do
-            clientsMVar' <- asks (clientsMVar . getcMVars)
-            io $ modifyMVar_ clientsMVar' (return . filter ((/=) clientHandle . snd))
+-- {{{ Parsers
+parseUser :: Parser (Text, Text, Text)
+parseUser = do
+    nick <- A.takeWhile1 (/= '!')
+    A.char '!'
+    name <- A.takeWhile1 (/= '@')
+    A.char '@'
+    host <- A.takeWhile1 (/= ' ')
+    return (nick, name, host)
 
--- TODO: clean up this
--- pass on messages from IRC to the clients in the MVar list
-ircListen :: CServer -> CMemory ()
-ircListen server@(CServer serverurl serverHandle serverMetas) = do
-    debug <- asks (verbosityC . getcConfig)
-    servers <- asks (serversC . getcConfig)
-    serverMVar' <- asks (serverMVar . getcMVars)
-    -- Try to read a message from the handle
-    e <- io $ try (T.hGetLine serverHandle) :: CMemory (Either SomeException T.Text)
-    when (debug > 0) $ io $ print e
-    case e of
-        Right line -> do
-            forkMe $ parseMsg server line
-            ircListen $ CServer serverurl serverHandle []
-        -- Reconnect
-        Left e -> do
-            io $ print e
-            when (debug > 1) . io $ putStrLn "Closing handle..."
-            io $ hClose serverHandle
-            let server' = serverurl `getByServerURL` servers
-            case server' of
-                Just x -> do
-                    when (debug > 1) . io $
-                        putStrLn $ "ircListen reconnect " ++ serverURL x
-                    newserver <- io $ ircc x
-                    -- Function for replacing the old CServer with the new one.
-                    let f xs = return . (newserver :) $ do
-                        x <- xs
-                        guard $ getcHandle x /= getcHandle server
-                        return x
-                    io $ modifyMVar_ serverMVar' f
-                    ircListen newserver
-                Nothing -> when (debug > 1) . io $ do
-                    putStrLn $ "Server `" ++ serverurl ++ "' not in `servers'"
+parseIRCMsg :: Parser IRCMsg
+parseIRCMsg = regular <|> status
+  where
+    regular = do
+        A.char ':'
+        sender <- A.takeWhile1 (/= ' ')
+        A.char ' '
+        cmd <- A.takeWhile (/= ' ')
+        A.char ' '
+        case cmd of
+            "PRIVMSG" -> do
+                dest <- A.takeWhile1 (/= ' ')
+                A.string " :"
+                msg <- A.takeText
+                return $ Privmsg (user sender) dest msg
+            "JOIN" -> do
+                A.char ':'
+                msg <- A.takeText
+                return $ Join (user sender) msg
+            "PART" -> do
+                dest <- A.takeWhile1 (/= ' ')
+                A.string " :"
+                msg <- A.takeText
+                return $ Part (user sender) dest msg
+            "KICK" -> do
+                dest <- A.takeWhile1 (/= ' ')
+                A.char ' '
+                kicknick <- A.takeWhile1 (/= ' ')
+                A.string " :"
+                msg <- A.takeText
+                return $ Kick (user sender) dest kicknick msg
+            "NICK" -> do
+                A.char ':'
+                newnick <- A.takeWhile1 (/= ' ')
+                return $ Nick (user sender) newnick
+            "INVITE" -> do
+                dest <- A.takeWhile1 (/= ' ')
+                A.string " :"
+                msg <- A.takeText
+                return $ Invite (user sender) dest msg
+            "QUIT" -> do
+                A.char ':'
+                msg <- A.takeText
+                return $ Quit (user sender) msg
+            "PONG" -> do
+                A.skip (/= ':')
+                A.char ':'
+                msg <- A.takeText
+                return $ Pong msg
+            "003" -> do
+                return Welcome
+            "353" -> do
+                A.takeWhile1 (/= ' ')
+                A.string " = "
+                dest <- A.takeWhile1 (/= ' ')
+                A.string " :"
+                nicks <- A.takeText
+                let nicks' = map (T.dropWhile (`elem` "+%@&~")) $ T.words nicks
+                return $ Userlist dest nicks'
+            _ -> return VoidIRCMsg
+    status = do
+        cmd <- A.takeWhile1 (/= ' ')
+        A.char ' '
+        case cmd of
+            "PING" -> do
+                A.char ':'
+                server <- A.takeText
+                return $ Ping server
+            "ERROR" -> do
+                A.char ':'
+                action <- A.takeWhile1 (/= ':')
+                A.string ": "
+                msg <- A.takeText
+                return VoidIRCMsg
+            _ -> return VoidIRCMsg
+    user :: Text -> User
+    user t = case A.parse parseUser (TL.pack . T.unpack $ t) of
+        Done _ (nick, name, host) -> User nick name host
+        _ -> error "parseMsg: user: not a username"
 
-parseMsg :: CServer -> T.Text -> CMemory ()
-parseMsg (CServer serverurl serverHandle serverMetas) line = do
-    debug <- asks (verbosityC . getcConfig)
-    servers <- asks (serversC . getcConfig)
-    timeMVar' <- asks (timeMVar . getcMVars)
-    clientsMVar' <- asks (clientsMVar . getcMVars)
-    let sFull :: [T.Text]
-        sFull = (== ':') `T.split` line
-        sMsg  = (T.pack ":") `T.intercalate` drop 2 sFull
-        sArgs = T.split (`elem` "!@ ") . T.concat . take 1 $ drop 1 sFull
-    time <- io $ fmap floor getPOSIXTime
-    io $ modifyMVar_ timeMVar' $ return . tupleInject (serverurl, time)
-    clientsWrite $ T.pack serverurl `T.append` line
-    case () of
-      _ | isPing line -> do
-            io . T.hPutStrLn serverHandle $ (T.pack "PONG") `T.append` T.drop 4 line
-        | isStatus line "003" -> do
-            when (debug > 1) $ do
-                io $ putStrLn "Server welcome message, joining channels."
-            let server' = findServer servers serverurl
-            when (isJust server') $ do
-                joinChannels serverHandle $ fromJust server'
-                nickservRegister serverHandle $ fromJust server'
-        | isStatus line "353" -> do -- add userlist
-            let dest = T.unpack $ sArgs !! 4
-                users = words $ T.unpack $ sMsg
-                users' = map (dropWhile (`elem` "~@%&+")) users
-            mapUserlist $ \xs -> do
-                cs@(CServer u h ms) <- xs
-                if serverurl == u then
-                    let meta = emptyMeta { getDestino = dest
-                                         , getUserlist = users'
-                                         }
-                        ms' = meta : do
-                            m <- ms
-                            guard $ dest /= getDestino m
-                            return m
-                    in return $ CServer u h ms'
-                else return cs
-        | isStatus line "JOIN" -> do -- add user to userlist
-            let dest = T.unpack $ sMsg
-                user = T.unpack $ sArgs !! 0
-            mapUserlist $ \xs -> do
-                cs@(CServer u h ms) <- xs
-                if serverurl == u then
-                    let ms' = do
-                            m <- ms
-                            if dest == getDestino m
-                                then return $ mapMetaUserlist (user :) m
-                                else return m
-                    in return $ CServer u h ms'
-                else return cs
-        | isStatus line "QUIT" -> do -- remove user from all userlists on server
-            let user = T.unpack $ sArgs !! 0
-            mapUserlist $ \xs -> do
-                cs@(CServer u h ms) <- xs
-                if serverurl == u then
-                    let ms' = do
-                            m <- ms
-                            let f = filter (/= user)
-                            return $ mapMetaUserlist f m
-                    in return $ CServer u h ms'
-                else return cs
-        | isStatus line "PART" -> do -- remove user from userlist
-            let dest = T.unpack $ sArgs !! 4
-                user = T.unpack $ sArgs !! 0
-            mapUserlist $ \xs -> do
-                cs@(CServer u h ms) <- xs
-                if serverurl == u then
-                    let ms' = do
-                            m <- ms
-                            let f = filter (/= user)
-                            if dest == getDestino m
-                                then return $ mapMetaUserlist f m
-                                else return m
-                    in return $ CServer u h ms'
-                else return cs
-        | isStatus line "KICK" -> do -- remove user from userlist
-            let dest = T.unpack $ sArgs !! 4
-                user = T.unpack $ sArgs !! 5
-            mapUserlist $ \xs -> do
-                cs@(CServer u h ms) <- xs
-                if serverurl == u then
-                    let ms' = do
-                            m <- ms
-                            let f = filter (/= user)
-                            if dest == getDestino m
-                                then return $ mapMetaUserlist f m
-                                else return m
-                    in return $ CServer u h ms'
-                else return  cs
-        | isStatus line "NICK" -> do -- change nick in userlist
-            let user = T.unpack $ sArgs !! 0
-                user2 = T.unpack $ sArgs !! 4
-            mapUserlist $ \xs -> do
-                cs@(CServer u h ms) <- xs
-                if serverurl == u then
-                    let ms' = do
-                            m <- ms
-                            let f = (user2 :) . filter (/= user)
-                            return $ mapMetaUserlist f m
-                    in return $ CServer u h ms'
-                else return cs
-        | isStatus line "433" -> do
-            let nick' = (++ "`") . serverNick <$> findServer servers serverurl
-            when (isJust nick') $ do
-                io . T.hPutStrLn serverHandle $
-                    T.unwords [T.pack "NICK", T.pack $ fromJust nick']
-        | otherwise -> return ()
-  where isPing :: T.Text -> Bool
-        isPing x = T.take 4 x == (T.pack "PING")
-        isStatus :: T.Text -> String -> Bool
-        isStatus x n =
-            let xs = T.words x
-                status = T.pack n
-            in if length xs >= 2
-                then xs !! 1 == status
-                else False
-        isJust (Just _) = True
-        isJust _ = False
+parseClientMsg :: Parser ClientMsg
+parseClientMsg = do
+    cmd <- A.takeWhile1 (/= ' ')
+    A.char ' '
+    case cmd of
+        "serverwrite" -> do
+            server <- A.takeWhile1 (/= ':')
+            A.char ':'
+            msg <- A.takeText
+            return $ ServerWrite server msg
+        "getuserlist" -> do
+            server <- A.takeWhile1 (/= ':')
+            A.char ':'
+            channel <- A.takeText
+            return $ GetUserlist server channel
+        _ -> return VoidClientMsg
+-- }}}
 
--- connect to an IRC server and return the handle
-ircc :: Server -> IO CServer
-ircc (Server port server chans nick nsPW _ _ _) = do
-    h <- connectTo server . PortNumber $ fromIntegral port
-    hSetEncoding h utf8
-    hSetBuffering h LineBuffering
-    hSetNewlineMode h (NewlineMode CRLF CRLF)
-    forM_ [nick', user'] (write h . T.pack)
+-- {{{ IRC
+connect :: Text -> Memory ()
+connect url = do
+    ServersConfig servers cs v <- see
+    let mserver = M.lookup url servers
+    mserver' <- case mserver of
+        Just (Server u p n c r Nothing t rt) -> liftIO $ do
+            handle <- connectToIRC u p
+            T.hPutStrLn handle $ T.unwords ["NICK", n]
+            T.hPutStrLn handle $ T.concat ["USER ", n, " 0 * :", n]
+            let server = Server u p n c r (Just handle) t rt
+            return $ Just server
+        Nothing -> return Nothing
+    case mserver' of
+        Just server@(Server u p n c r (Just h) t rt) -> do
+            let servers' = M.insert url server servers
+            put $ ServersConfig servers' cs v
+            void . forkMe $ ircListen u h
+        _ -> do
+            -- Server does not exist in Config
+            liftIO . T.putStrLn $ T.unwords [ "connect:"
+                                            , url
+                                            , "does not exist in Config."
+                                            ]
+            return ()
+  where
+    connectToIRC url p = liftIO $ do
+        handle <- liftIO $ connectTo (T.unpack url) $ PortNumber p
+        liftIO $ hSetEncoding handle utf8
+        liftIO $ hSetBuffering handle LineBuffering
+        liftIO $ hSetNewlineMode handle (NewlineMode CRLF CRLF)
+        return handle
 
-    return $ CServer server h []
-  where nick' = "NICK " ++ nick
-        user' = "USER " ++ nick ++ " 0 * :" ++ nick
-
-joinChannels :: Handle -> Server -> CMemory ()
-joinChannels h (Server _ serverurl chans _ _ _ _ _) = do
-    let chans' = map ("JOIN " ++) chans
-    forM_ chans' $ io . write h . T.pack
-
-nickservRegister :: Handle -> Server -> CMemory ()
-nickservRegister h (Server _ _ _ _ nsPW _ _ _) = do
-    debug <- asks (verbosityC . getcConfig)
-    unless (null nsPW) . io .  write h . T.pack $ unwords [identify, nsPW]
-    if debug > 1
-        then io $ putStrLn $ unwords [identify, nsPW]
-        else io $ putStrLn $ ">" ++ unwords [identify, take (length nsPW) censor]
-  where identify = "PRIVMSG NickServ :IDENTIFY"
-        censor = cycle "*"
-
-mapUserlist :: ([CServer] -> [CServer]) -> CMemory ()
-mapUserlist f = do
-    serverMVar' <- asks (serverMVar . getcMVars)
-    io . modifyMVar_ serverMVar' $ return . f
-
--- create some core data, connect to IRC servers and create the server socket
-main :: IO ()
-main = do
-    let debug = verbosityC config
-        servers = serversC config
-    -- IRC handles
-    hs <- forM servers ircc
-    when (debug > 1) $ print hs
-    -- list of clients connected to the socket
-    sockMVar <- newMVar []
-    --  MVar with Text input from clients connected to the socket.
-    inputMVar <- newMVar []
-    -- MVar with current IRC servers.
-    serverMVar <- newMVar hs
-    -- generate timestamp
-    time <- fmap floor getPOSIXTime
-    timeMVar <- newMVar $ zip (map getcServerURL hs) (cycle [time])
-    let mvarConfig = MVarConfig { getcChannels = []
-                                , getcMVars = MVars { clientsMVar = sockMVar
-                                                    , textMVar = inputMVar
-                                                    , serverMVar = serverMVar
-                                                    , timeMVar = timeMVar
-                                                    }
-                                , getcConfig = config
-                                }
-        run f = runReaderT f mvarConfig
-    -- create socket that clients connect to
-    socket <- listenOn (PortNumber $ fromIntegral 3737)
-    run . void . forkMe $ socketlisten socket
-    forM_ hs (\h -> run . forkMe $ ircListen h)
-    run . void . forkMe $ clientsInit
-    run . forever $ userInput
-
--- get direct input prefixed with the server URL and send, for example:
--- irc.freenode.net:PRIVMSG #kawaiibot :This is a nice message!
-userInput :: CMemory ()
-userInput = do
-    debug <- asks (verbosityC . getcConfig)
-    serverMVar' <- asks (serverMVar . getcMVars)
-    hs <- io $ readMVar serverMVar'
-    line <- io $ T.getLine
-    forM_ hs $ \(CServer s h m) -> do
-        let server = T.takeWhile (/= ':') line
-        when (server == T.pack s) $ do
-            io $ T.hPutStrLn h (T.tail $ T.dropWhile (/= ':') line)
-            when (debug > 1) . io $ putStrLn "Successfully sent!"
-
--- hClose and remove a server tuple from the IRC server MVar
-removeServer :: String -> CMemory ()
-removeServer server = do
-    serverMVar' <- asks (serverMVar . getcMVars)
-    timeMVar' <- asks (timeMVar . getcMVars)
-    let f = \(CServer server' handle metas) -> if server == server'
-                then do
-                    io $ hClose handle
-                    return False
-                else do
-                    return True
-    io $ modifyMVar_ serverMVar' $ filterM f
-    io $ modifyMVar_ timeMVar' $ filterM (return . (/= server) . fst)
-
-rejoinServer :: String -> CMemory ()
-rejoinServer server = do
-    debug <- asks (verbosityC . getcConfig)
-    serverMVar' <- asks (serverMVar . getcMVars)
-    timeMVar' <- asks (timeMVar . getcMVars)
-    mserver <- asks (getByServerURL server . serversC . getcConfig)
+-- | Reconnect to an IRC server.
+reconnect :: Text -> Memory ()
+reconnect server = do
+    mserver <- M.lookup server . serversC <$> see
     case mserver of
-        Just server' -> do
-            when (debug > 1) . io $ do
-                putStrLn $ "rejoinServer " ++ server
-            cserver <- io $ ircc server'
+        Just s -> do
+            case serverHandle s of
+                Just h -> void $ tryHClose h
+                Nothing -> return ()
+            let s' = s { serverHandle = Nothing }
+            ServersConfig ss cc vv <- see
+            put $ ServersConfig (M.insert server s' ss) cc vv
+            connect server
+        Nothing -> liftIO . T.putStrLn $ T.unwords [ "reconnect:"
+                                                   , server
+                                                   , "does not exist in Config."
+                                                   ]
+  where
+    tryHClose :: Handle -> Memory (Either SomeException ())
+    tryHClose = liftIO . try . hClose
 
-            time <- io $ fmap floor getPOSIXTime
-            io $ modifyMVar_ timeMVar' $ return . tupleInject (server, time)
+-- | Monitor IRC server timeouts by checking the last received and sent message
+-- timestamps.
+monitorTimeouts :: Memory ()
+monitorTimeouts = forever $ do
+    ss <- serversC <$> see
+    time <- liftIO $ floor <$> getPOSIXTime
+    forM_ (M.toList ss) $ \(_, server) -> do
+        let tstamp = time - serverTStamp server
+            rstamp = time - serverRStamp server
+        case () of
+          _ | tstamp > 185 && rstamp < 180 -> case serverHandle server of
+                Just h -> void . forkMe $ ircWrite h "PING irc.adelais.net"
+                Nothing -> do
+                    liftIO . T.putStrLn $ T.unwords [ "monitorTimeouts:"
+                                                    , serverURL server
+                                                    , "has no Handle."
+                                                    ]
+                    void . forkMe $ reconnect $ serverURL server
+            | tstamp + rstamp > 370 -> do
+                liftIO . T.putStrLn $ T.unwords [ "monitorTimeouts:"
+                                                , serverURL server
+                                                , "timed out. R + T."
+                                                ]
+                void . forkMe $ reconnect $ serverURL server
+            | tstamp > 200 -> do
+                liftIO . T.putStrLn $ T.unwords [ "monitorTimeouts:"
+                                                , serverURL server
+                                                , "timed out. T."
+                                                ]
+                void . forkMe $ reconnect $ serverURL server
+            | otherwise -> return ()
+    liftIO $ threadDelay $ 10^6
 
-            io $ modifyMVar_ serverMVar' (return . (cserver:))
-            ircListen cserver
-        Nothing -> io . putStrLn $ unwords [ "Rejoin:"
-                                           , server
-                                           , "not in servers"
-                                           ]
+-- | Listen to an IRC `Handle' and then parse the message and respond
+-- appropriately.
+ircListen :: Text -> Handle -> Memory ()
+ircListen server handle = do
+    let tryGetLine :: Memory (Either SomeException TL.Text)
+        tryGetLine = liftIO . try $ TL.hGetLine handle
+    e <- tryGetLine
+    case e of
+        Right line -> do
+            liftIO $ print line
+            let ircmsg = A.parse parseIRCMsg line
+            case resultToMessage ircmsg of
+                Privmsg (User nick name host) dest msg -> do
+                    clientsWrite $ T.concat [server, T.pack . TL.unpack $ line]
+                Join (User nick name host) dest -> do
+                    modUserlist (nick :) server dest
+                Part (User nick name host) dest msg -> do
+                    modUserlist (filter (/= nick)) server dest
+                Quit (User nick name host) msg -> do
+                    mserver <- M.lookup server . serversC <$> see
+                    case mserver of
+                        Just s -> forM_ (M.keys $ serverChans s) $ \chan -> do
+                            modUserlist (filter (/= nick)) server chan
+                        Nothing -> liftIO $ do
+                            T.putStrLn $ T.unwords [ "ircListen:"
+                                                   , server
+                                                   , "not in Servers."
+                                                   ]
+                Nick (User nick name host) newnick -> do
+                    mserver <- M.lookup server . serversC <$> see
+                    case mserver of
+                        Just s -> do
+                            forM_ (M.keys $ serverChans s) $ \chan -> do
+                                let f xs = if nick `elem` xs
+                                        then newnick : filter (/= nick) xs
+                                        else xs
+                                modUserlist f server chan
+                        Nothing -> return ()
+                Userlist dest users -> do
+                    clientsWrite $ T.concat [ "getuserlist "
+                                            , server, " "
+                                            , dest, ":"
+                                            , T.unwords users
+                                            ]
+                    modUserlist (\_ -> users) server dest
+                Ping msg -> do
+                    ircWrite handle $ T.concat ["PONG :", msg]
+                    updateRStamp server
+                Welcome -> do
+                    mc <- do
+                        servers <- serversC <$> see
+                        return $ serverChans <$> M.lookup server servers
+                    let c = fromJust $ mc <|> Just M.empty
+                    forM_ (M.keys c) $ \channel -> liftIO $ do
+                        T.hPutStrLn handle $ T.unwords ["JOIN", channel]
+                _ -> do
+                    clientsWrite $ T.concat [server, T.pack . TL.unpack $ line]
+            updateTStamp server
+            ircListen server handle
+        Left e -> do
+            -- Could not get line from handle
+            liftIO $ putStr "ircListen: " >> print e
+            reconnect server
+  where
+    resultToMessage (Done _ x) = x
+    resultToMessage _ = VoidIRCMsg
 
-io :: MonadIO m => IO a -> m a
-io = liftIO
+updateTStamp :: Text -> Memory ()
+updateTStamp s = do
+    ServersConfig ss cc vv <- see
+    let mserver = M.lookup s ss
+    case mserver of
+        Just server -> do
+            time <- liftIO $ floor <$> getPOSIXTime
+            let server' = server { serverTStamp = time }
+                servers = M.insert s server' ss
+            put $ ServersConfig servers cc vv
+        Nothing -> liftIO $ do
+            T.putStrLn $ T.unwords ["updateTStamp:", s, "not in ServersConfig."]
+
+updateRStamp :: Text -> Memory ()
+updateRStamp s = do
+    ServersConfig ss cc vv <- see
+    let mserver = M.lookup s ss
+    case mserver of
+        Just server -> do
+            time <- liftIO $ floor <$> getPOSIXTime
+            let server' = server { serverRStamp = time }
+                servers = M.insert s server' ss
+            put $ ServersConfig servers cc vv
+        Nothing -> liftIO $ do
+            T.putStrLn $ T.unwords ["updateRStamp:", s, "not in ServersConfig."]
+
+modUserlist :: ([Text] -> [Text]) -> Text -> Text -> Memory ()
+modUserlist f s c = do
+    ServersConfig ss cc vv <- see
+    let mserver = M.lookup s ss
+    case mserver of
+        Just server -> do
+            let mchan = M.lookup c $ serverChans server
+            case mchan of
+                Just chan -> do
+                    let chan' = f chan
+                        chans = M.insert c chan' $ serverChans server
+                        server' = server { serverChans = chans }
+                        servers = M.insert s server' ss
+                    liftIO $ print server'
+                    put $ ServersConfig servers cc vv
+                Nothing -> liftIO $ do
+                    T.putStrLn $ T.unwords ["modUserlist:", c, "not in", s]
+        Nothing -> liftIO $ do
+            T.putStrLn $ T.unwords ["modUserlist:", s, "not in ServersConfig."]
+
+ircWrite :: Handle -> Text -> Memory ()
+ircWrite h t = liftIO $ do
+    putStr "<- " >> T.putStrLn t
+    T.hPutStrLn h t
+-- }}}
+
+-- {{{ Client
+clientsWrite :: Text -> Memory ()
+clientsWrite t = do
+    clients <- clientsC <$> see
+    liftIO $ putStr "-> " >> T.putStrLn t
+    forM_ (snd clients) (void . tryPutLine . snd)
+  where
+    tryPutLine :: Handle -> Memory ()
+    tryPutLine h = do
+        let f :: Memory (Either SomeException ())
+            f = liftIO $ try $ T.hPutStrLn h t
+        e <- f
+        case e of
+            Right _ -> return ()
+            Left e -> do
+                removeClient h
+
+removeClient :: Handle -> Memory ()
+removeClient handle = do
+    ServersConfig s (time, clients) v <- see
+    let clients' = filter ((/= handle) . snd) clients
+    time' <- liftIO $ floor <$> getPOSIXTime
+    put $ ServersConfig s (time', clients') v
+
+clientListen :: HostName -> Handle -> Memory ()
+clientListen host handle = do
+    e <- tryGetLine handle
+    case e of
+        Right line -> do
+            let clientmsg = A.parse parseClientMsg line
+            case resultToMessage clientmsg of
+                ServerWrite serverurl msg -> do
+                    mserver <- M.lookup serverurl . serversC <$> see
+                    case mserver of
+                        Just server -> do
+                            case serverHandle server of
+                                Just handle -> do
+                                    ircWrite handle msg
+                                    updateRStamp serverurl
+                                Nothing -> liftIO $ do 
+                                    T.putStrLn $ T.unwords [ "clientListen:"
+                                                           , "No handle found:"
+                                                           , serverurl
+                                                           ]
+                        Nothing -> liftIO $ do
+                            T.putStrLn $ T.unwords [ "clientListen: ServerWrite"
+                                                   , serverurl
+                                                   , "not in Servers" ]
+                GetUserlist serverurl chan -> do
+                    mserver <- M.lookup serverurl . serversC <$> see
+                    case mserver of
+                        Just server -> do
+                            case M.lookup chan $ serverChans server of
+                                Just users -> do
+                                    let users' = T.unwords users
+                                    clientsWrite $ T.concat [ "getuserlist "
+                                                            , serverurl, " "
+                                                            , chan, ":"
+                                                            , users'
+                                                            ]
+                                Nothing -> liftIO $ do
+                                    T.putStrLn $ T.unwords [ chan
+                                                           , "not in channels."
+                                                           ]
+                        Nothing -> liftIO $ do
+                            T.putStrLn $ T.unwords [ "clientListen: GetUserlist"
+                                                   , serverurl
+                                                   , "not in Servers" ]
+                _ -> do
+                    liftIO $ do
+                        putStr "clientListen: VoidClientMsg: "
+                        print line
+            clientListen host handle
+        Left e -> do
+            liftIO $ putStr "clientListen: " >> print e
+  where
+    tryGetLine :: Handle -> Memory (Either SomeException TL.Text)
+    tryGetLine = liftIO . try . TL.hGetLine
+    resultToMessage (Done _ x) = x
+    resultToMessage _ = VoidClientMsg
+
+socketListen :: Socket -> Memory ()
+socketListen sock = do
+    (handle, host, _) <- liftIO $ accept sock
+    liftIO $ do
+        -- set handle character encoding to utf8
+        hSetEncoding handle utf8
+        -- line buffering instead of block buffering
+        hSetBuffering handle LineBuffering
+        -- newline mode to \r\n
+        hSetNewlineMode handle (NewlineMode CRLF CRLF)
+        putStrLn $ "Client " ++ host ++ " is listening."
+    time <- liftIO $ floor <$> getPOSIXTime
+    ServersConfig ss (tsp, cs) v <- see
+    put $ ServersConfig ss (time, (T.pack host, handle) : cs) v
+    forkMe $ clientListen host handle
+    servers <- serversC <$> see
+    forM_ (M.toList servers) $ \(serverurl, server) -> do
+        forM_ (M.toList $ serverChans server) $ \(chan, users) -> do
+            let users' = T.unwords users
+            liftIO $ T.hPutStrLn handle $ T.concat [ "getuserlist "
+                                                   , serverurl, " "
+                                                   , chan, ":"
+                                                   , users'
+                                                   ]
+    socketListen sock
+-- }}}
+
+initConnects :: Memory ()
+initConnects = do
+    sock <- liftIO . listenOn $ PortNumber 3737
+    forkMe $ socketListen sock
+    forkMe monitorTimeouts
+    serverurls <- M.keys . serversC <$> see
+    forM_ serverurls connect
+
+keyboardInput :: Memory ()
+keyboardInput = do
+    line <- liftIO TL.getLine
+    let ircmsg = A.parse parseIRCMsg line
+    case ircmsg of
+        Done x y -> liftIO $ print y
+        _ -> liftIO $ print ircmsg
+    keyboardInput
+
+main :: IO ()
+main = withSocketsDo $ do
+    tsp <- floor <$> getPOSIXTime
+    let verbosity = KT.verbosityC KC.config
+        servers = flip M.map staticServers $ \s -> s { serverTStamp = tsp
+                                                     , serverRStamp = tsp
+                                                     }
+    configMVar <- atomically . newTMVar $ ServersConfig servers (tsp, []) verbosity
+    forkIO $ runReaderT initConnects configMVar
+    runReaderT keyboardInput configMVar
+
+put :: ServersConfig -> Memory ()
+put s = ask >>= void . liftIO . atomically . flip swapTMVar s
+
+see :: Memory ServersConfig
+see = ask >>= liftIO . atomically . readTMVar

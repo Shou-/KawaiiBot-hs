@@ -28,39 +28,76 @@ import KawaiiBot.Utils
 
 import Control.Applicative
 import Control.Concurrent
-import Control.Exception
+import Control.Exception as E
 import Control.Monad hiding (join)
 import qualified Control.Monad as M
 import Control.Monad.Reader hiding (join)
+
 import Data.List
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import Data.Time.Clock
 import Data.Time.Clock.POSIX
-import Data.Maybe (fromJust, listToMaybe)
+import Data.Time.Format
+import Data.Maybe
 import Data.String.Utils (split, join, strip)
+
 import Network
+
+import System.Directory
 import System.IO
+import System.Locale
 import System.Random (randomRIO)
 
 
--- | Writes to the core which then passes it to an IRC channel or user.
+-- | Writes to the core which then passes it to an IRC server.
 ircwrite :: Handle -> String -> Memory ()
 ircwrite h str = do
+    debug <- asks (verbosityC . getConfig)
     meta <- asks getMeta
     let server = getServer meta
-        message = server ++ ":" ++ str
+        message = concat ["serverwrite ", server, ":", str]
     e <- liftIO $ try (hPutStrLn h message) :: Memory (Either SomeException ())
     case e of
-        Right _ -> liftIO . putStrLn $ '>' : message
-        Left e -> liftIO $ print e
+        Right _ -> when (debug > 1) . liftIO . putStrLn $ "<- " ++ message
+        Left e -> when (debug > 0) . liftIO $ print e
 
 -- | Writes to the core.
 corewrite :: Handle -> String -> Memory ()
 corewrite h str = do
+    debug <- asks (verbosityC . getConfig)
+    let message = "<Core>" ++ ":" ++ str
     e <- liftIO $ try (hPutStrLn h str) :: Memory (Either SomeException ())
     case e of
-        Right _ -> liftIO . putStrLn $ '>' : str
-        Left e -> liftIO $ print e
+        Right _ -> when (debug > 1) . liftIO . putStrLn $ "<- " ++ message
+        Left e -> when (debug > 0) . liftIO $ print e
+
+logWrite :: String -> Memory ()
+logWrite msg = do
+    meta <- asks getMeta
+    logsPath <- asks (logsPathC . getConfig)
+    verbosity <- asks (verbosityC . getConfig)
+    time <- do
+        utc <- liftIO $ getCurrentTime
+        return $ formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" utc
+    let writeLog :: Memory (Either SomeException ())
+        writeLog = liftIO . try $ do
+            let serverurl = getServer meta
+                dest = getDestino meta
+                path = logsPath ++ serverurl ++ " " ++ dest
+                nick = getUsernick meta
+                full = '\n' : intercalate "\t" [time,nick,msg]
+                tmpfile = "/tmp/" ++ serverurl ++ " " ++ dest
+            E.catch (copyFile path tmpfile) $ \e -> do
+                evaluate (e :: SomeException)
+                writeFile path ""
+                copyFile path tmpfile
+            appendFile tmpfile full
+            copyFile tmpfile path
+    e <- writeLog
+    case e of
+        Right _ -> return ()
+        Left e -> when (verbosity > 0) . liftIO $ print e
 
 -- | Reinitialize an event.
 eventInit :: Event -> Memory Event
@@ -111,8 +148,9 @@ event h = do
 listenLoop :: Handle -> Memory ()
 listenLoop h = do
     s <- liftIO $ hGetLine h
-    let arg = takeWhile (/= ':') s
+    let arg = takeWhile (`notElem` " :") s
     if arg `elem` coreArgs then do
+        liftIO . putStrLn $ "-> " ++ s
         mc <- parseCore h s
         local (\_ -> mc) $ listenLoop h
     else do
@@ -132,8 +170,8 @@ parseCore :: Handle -- ^ Core server handle
 parseCore h bs = do
     debug <- asks (verbosityC . getConfig)
     mc@(MetaConfig meta config) <- ask
-    let (sCmd : xs) = split ":" bs
-        sArgs = words $ join ":" xs
+    let (sCmd : xs) = concat (split " " <$> split ":" bs)
+        sArgs = xs
     when (debug > 1) . liftIO . print $ sCmd : sArgs
     case sCmd of
         "getuserlist" -> do
@@ -144,7 +182,7 @@ parseCore h bs = do
             case margs of
                 Just (se, ch, us) -> do
                     let servs = injectServerUserlist (serversC config) se ch us
-                        conf = mapConfigServers (\_ -> servs) config
+                        conf = mapConfigServers (const servs) config
                     return $ MetaConfig meta conf
                 -- Not enough arguments (this isn't supposed to ever happen)
                 Nothing -> return mc
@@ -156,6 +194,7 @@ parseIRC :: Handle -- ^ Core server handle
          -> String -- ^ message received
          -> Memory ()
 parseIRC h bs = do
+    debug <- asks (verbosityC . getConfig)
     meta <- asks getMeta
     let nick = getUsernick meta
         sFull :: [String]
@@ -163,7 +202,7 @@ parseIRC h bs = do
         sMsg  = ":" `join` drop 2 sFull
         sArgs = map strip . splits "!@ " . concat . take 1 $ drop 1 sFull
         meta' = sFull !! 0 `injectServ` meta
-    liftIO . putStrLn $ show sArgs ++ ' ' : sMsg
+    when (debug > 1) . liftIO . putStrLn $ show sArgs ++ ' ' : sMsg
     local (injectMeta meta') $ parseMsg h (sArgs, sMsg)
   where parseMsg :: Handle -> ([String], String) -> Memory ()
         parseMsg h (args, msg)
@@ -183,33 +222,37 @@ parseIRC h bs = do
 
                 local (injectMeta meta') $ do
                     meta <- asks getMeta
-                    titleFetching <- getFunc allowTitle
                     msgLogging <- asks (msgLoggingC . getConfig)
 
-                    when titleFetching . void . forkMe $ do -- URL fetching
+                    allowThen allowTitle $ do -- URL fetching
                         let urls = filter (isPrefixOf "http") $ words msg
-                        forM_ urls $ \url -> do
+                        forkMe . forM_ urls $ \url -> do
                             title' <- fmap fromMsg $ title url
-                            let message = "PRIVMSG " ++ dest ++ " :\ETX5Title\ETX: " ++ title'
-                            unless (null title') $ ircwrite h message
+                            let titleMsg = unwords [ "PRIVMSG"
+                                                   , dest
+                                                   , ":\ETX5→\ETX"
+                                                   , title'
+                                                   ]
+                            unless (null title') $ ircwrite h titleMsg
+                        return EmptyMsg
                     post <- parser msg
                     let mAct = if isChannelMsg post
                             then "PRIVMSG " ++ dest
                             else "PRIVMSG " ++ nick
                         msg' = fromMsg post
 
-                    unless (null msg') . ircwrite h $ mAct ++ " :" ++ msg'
+                    when msgLogging $ do -- logging
+                        logWrite msg
 
-                    logsPath <- asks (logsPathC . getConfig)
-                    verbosity <- asks (verbosityC . getConfig)
-                    liftIO . when msgLogging $ do -- logging
-                        e <- try (do
-                            let path = logsPath ++ serverurl ++ " " ++ dest
-                            appendFile path $ show (args, msg) ++ "\n") :: IO (Either SomeException ())
-                        case e of
-                            Right _ -> return ()
-                            Left e -> do
-                                when (verbosity > 0) $ print e
+                    unless (null msg') $ do
+                        ircwrite h $ mAct ++ " :" ++ msg'
+                        kawaiinick <- getServerNick
+                        let kawaiimeta = emptyMeta { getUsernick = kawaiinick
+                                                   , getDestino = dest
+                                                   , getServer = serverurl
+                                                   }
+                        local (injectMeta kawaiimeta) $ do
+                            logWrite msg'
 
                     return ()
             | isCmd args 3 "INVITE" = do -- Join a channel on invite
@@ -225,8 +268,10 @@ parseIRC h bs = do
 
                     meta' = Meta dest nick name host channels serverurl temp
 
-                -- check this channel against a list of banned ones or something
-                allowedChans <- asks (fmap allowedChannels . (`findServer` serverurl) . serversC . getConfig)
+                allowedChans <- do
+                    let servers = serversC . getConfig
+                        mserver = (`findServer` serverurl) . servers
+                    asks (fmap allowedChannels . mserver)
                 case allowedChans of
                     Just (Blacklist xs) -> do
                         if msg `elem` xs then do
@@ -247,28 +292,28 @@ parseIRC h bs = do
                 let dest = args !! 4
                     serverurl = getServer meta
 
-                corewrite h $ "getuserlist:" ++ unwords [serverurl, dest]
+                corewrite h $ concat ["getuserlist ", serverurl, ":", dest]
             | isCmd args 3 "PART" = do
                 meta <- asks getMeta
                 let nick = args !! 0
                     dest = args !! 4
                     serverurl = getServer meta
 
-                corewrite h $ "getuserlist:" ++ unwords [serverurl, dest]
+                corewrite h $ concat ["getuserlist ", serverurl, ":", dest]
             | isCmd args 3 "JOIN" = do
                 meta <- asks getMeta
                 let nick = args !! 0
                     dest = msg
                     serverurl = getServer meta
 
-                corewrite h $ "getuserlist:" ++ unwords [serverurl, dest]
+                corewrite h $ concat ["getuserlist ", serverurl, ":", dest]
                 varPath <- asks (variablePathC . getConfig)
                 svars <- liftIO $ lines <$> readFile varPath
                 let mvar :: [Variable]
                     mvar = do
                         v <- svars
                         let mvars = maybeRead v
-                        guard $ mvars /= Nothing
+                        guard $ isJust mvars
                         let var = fromJust mvars
                         guard $ readableReminder serverurl dest nick var
                         return var
@@ -303,7 +348,7 @@ parseIRC h bs = do
                     chans = fromJust $ mchans <|> Just []
 
                 forM_ chans $ \chan -> do
-                    corewrite h $ "getuserlist:" ++ unwords [serverurl, chan]
+                    corewrite h $ concat ["getuserlist ", serverurl, ":", chan]
             | isCmd args 3 "NICK" = do 
                 meta <- asks getMeta
                 servers <- asks (serversC . getConfig)
@@ -320,7 +365,7 @@ parseIRC h bs = do
                     chans = fromJust $ mchans <|> Just []
 
                 forM_ chans $ \chan -> do
-                    corewrite h $ "getuserlist:" ++ unwords [serverurl, chan]
+                    corewrite h $ concat ["getuserlist ", serverurl, ":", chan]
             | isCmd args 3 "MODE" = do 
                 let nick = args !! 0
                     dest = args !! 4
@@ -328,11 +373,11 @@ parseIRC h bs = do
 
                 return ()
             | isCmd args 1 "353" = do -- Receive nick list
-                let dest = args !! 4 -- use this stuff to handle userlists later
-                    --f = \_ -> map (\x'@(x:xs) -> if x `elem` ['~', '&', '@', '%', '+'] then (x, xs) else (' ', x')) $ split " " msg
-                    --meta' = f `modUserlist` meta -- meta doesn't hold userlists anymore
+                meta <- asks getMeta
+                let dest = args !! 4
+                    serverurl = getServer meta
 
-                return ()
+                corewrite h $ concat ["getuserlist ", serverurl, ":", dest]
             | otherwise = do -- Fallback
                 return ()
         isCmd args n x | length args >= 3 = args !! 3 == x
