@@ -261,7 +261,7 @@ anime' :: [String] -> String -> Memory [String]
 anime' args str = do
     let (str', filters) = foldr' sepFilter ("", []) $ words str
         burl = "http://www.nyaa.eu/?page=search&cats=1_37&filter=2&term="
-    html <- liftIO $ curlGetString' (burl ++ urlEncode' str') []
+    html <- liftIO $ httpGetString (burl ++ urlEncode' str')
     let elem' = fromMaybeElement $ parseXMLDoc html
         qname = QName "td" Nothing Nothing
         attrs = [Attr (QName "class" Nothing Nothing) "tlistname"]
@@ -288,7 +288,7 @@ airing2 args str = do
         amount = if length args > 1 then (args !! 1) `safeRead` 10 else 10 :: Int
         url = "http://www.mahou.org/Showtime/?o=ET"
         isSearch = not $ null str
-    content <- liftIO $ curlGetString' url []
+    content <- liftIO $ httpGetString url
     let elem = fromMaybeElement $ parseXMLDoc content
         qTable = QName "table" Nothing Nothing
         aSummary = [Attr (QName "summary" Nothing Nothing) "Currently Airing"]
@@ -512,7 +512,7 @@ sage args str = do
 manga :: [String] -> String -> Memory (Message String)
 manga cargs str = do
     let burl = "https://www.mangaupdates.com/releases.html?act=archive&search="
-    html <- liftIO $ curlGetString' (burl ++ urlEncode' str) []
+    html <- liftIO $ httpGetString (burl ++ urlEncode' str)
     let elem' = fromMaybeElement $ parseXMLDoc html
         qname = QName "td" Nothing Nothing
         attrs = [Attr (QName "class" Nothing Nothing) "text pad"]
@@ -554,20 +554,8 @@ random args str
 -- | Website title function.
 title :: String -> Memory (Message String)
 title str = do
-    let opts = [ CurlFollowLocation True
-               , CurlTimeout 5
-               , CurlMaxFileSize (1024 * 1024 * 5)
-               , CurlUserAgent $ unwords [ "Mozilla/5.0"
-                                         , "(X11; Linux x86_64;"
-                                         , "rv:10.0.2)"
-                                         , "Gecko/20100101"
-                                         , "Firefox/10.0.2"
-                                         ]
-               ]
-    response <- liftIO $ curlGetResponse str opts
-    let headers = respHeaders response
-        contentTypeResp = headers `tupleListGet` "Content-Type"
-        contentResp = respBody response
+    (contentResp, headers, _, _) <- liftIO $ httpGetResponse str
+    let contentTypeResp = headers `tupleListGet` "Content-Type"
     if "text/html" `isInfixOf` strip contentTypeResp then do
         let maybeElems = parseXMLDoc contentResp
             elems = if isNothing maybeElems
@@ -622,7 +610,7 @@ translate args str = do
                                 "&texts=" ++ str',
                                 "&from=" ++ from,
                                 "&to=" ++ to ]
-            jsonStr <- liftIO $ ((\_ -> return "") :: SomeException -> IO String) `handle` curlGetString' url []
+            jsonStr <- liftIO $ ((\_ -> return "") :: SomeException -> IO String) `handle` httpGetString url
             liftIO . when (verbosity > 1) $ putStrLn url >> putStrLn jsonStr
 
             let jsonStr' = dropWhile (/= '[') jsonStr
@@ -1183,7 +1171,7 @@ yuri args str = do
 weather :: [String] -> String -> Memory (Message String)
 weather _ str = do
     let burl = "http://www.google.com/ig/api?weather="
-    xml <- liftIO $ curlGetString' (burl ++ urlEncode' str) []
+    xml <- liftIO $ httpGetString (burl ++ urlEncode' str)
     let weatherElem = fromMaybeElement $ parseXMLDoc xml
         eCity = findElement (QName "city" Nothing Nothing) weatherElem
         eCurrent = findElements (QName "current_conditions" Nothing Nothing) weatherElem
@@ -1205,7 +1193,7 @@ weather _ str = do
 wiki :: [String] -> String -> Memory (Message String)
 wiki args s = do
     let burl = "https://en.wikipedia.org/w/index.php?search=%s&title=Special%3ASearch"
-    html <- liftIO $ curlGetString' (burl % (replace "+" "%20" . urlEncode') s) []
+    html <- liftIO $ httpGetString (burl % (replace "+" "%20" . urlEncode') s)
     let xml = fromMaybeElement $ parseXMLDoc html
         qDiv = QName "div" (Just "http://www.w3.org/1999/xhtml") Nothing
         qMwcontent = [Attr (QName "id" Nothing Nothing) "mw-content-text"]

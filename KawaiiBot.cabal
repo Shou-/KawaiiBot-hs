@@ -20,7 +20,6 @@ Executable kawaiibot-client
         case-insensitive,
         cgi,
         containers,
-        curl,
         directory,
         http-conduit,
         json,

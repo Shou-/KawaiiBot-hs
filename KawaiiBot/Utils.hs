@@ -32,9 +32,9 @@ import Control.Exception
 import qualified Control.Monad as M
 import Control.Monad.Reader
 
-import qualified Data.ByteString.Base64 as B64
-import qualified Data.ByteString.Char8 as C8
+import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.UTF8 as BU
 import qualified Data.CaseInsensitive as CI
 import Data.Char (toUpper, toLower, isDigit)
 import Data.Maybe (fromJust, listToMaybe)
@@ -359,29 +359,39 @@ stringToVar f se ch ni na co
     | otherwise = Normal se ch ni na co
 
 -------------------------------------------------------------------------------
--- ** Network.Curl utils
+-- ** HTTP utils
 -------------------------------------------------------------------------------
 
--- | `curlGetString' with default list of `CurlOption'.
-curlGetString' :: FilePath -> [CurlOption] -> IO String
-curlGetString' url opt =
-    let errorfunc :: SomeException -> IO String
-        errorfunc e = print e >> return ""
-        opt' = opt ++ [ CurlFollowLocation True
-                      , CurlTimeout 5
-                      , CurlMaxFileSize (1024 ^ 2)
-                      , CurlUserAgent $ unwords [ "Mozilla/5.0"
-                                                , "(X11; Linux x86_64;"
-                                                , "rv:10.0.2)"
-                                                , "Gecko/20100101"
-                                                , "Firefox/10.0.2"
-                                                ]
-                      ]
-        curlFetch = do
-            (status, response) <- curlGetString url opt'
-            print status
-            return response
-    in handle errorfunc curlFetch
+httpGetResponse :: MonadIO m => String -> m (String, [(String, String)], String, String)
+httpGetResponse url = liftIO $ withManager $ \man -> do
+    initReq <- parseUrl url
+    let req = initReq { requestHeaders = (htitle, useragent)
+                                         : requestHeaders initReq
+                      }
+    r <- httpLbs req man
+    let b = responseBody r
+        s = responseStatus r
+        v = responseVersion r
+        h = responseHeaders r
+    return $ ( BU.toString $ B.concat $ BL.toChunks b
+             , flip map h $ \(k, v) ->
+                (BU.toString $ CI.original k, BU.toString v)
+             , show s
+             , show v
+             )
+  where
+    htitle = "User-Agent"
+    useragent = "Mozilla/5.0 (X11; Linux x86_64; rv:10.0.2) Gecko/20100101 Firefox/10.0.2"
+
+httpGetString :: MonadIO m => String -> m String
+httpGetString url = liftIO $ withManager $ \man -> do
+    (str, _, _, _) <- httpGetResponse url
+    if length str > 10 ^ 6 * 2
+        then return ""
+        else return str
+  where
+    htitle = "User-Agent"
+    useragent = "Mozilla/5.0 (X11; Linux x86_64; rv:10.0.2) Gecko/20100101 Firefox/10.0.2"
 
 -- | Encode a URL
 urlEncode' :: String -> String
@@ -390,30 +400,6 @@ urlEncode' = urlEncode . encodeString
 -- | Decode an encoded URL
 urlDecode' :: String -> String
 urlDecode' = decodeString . urlDecode
-
--------------------------------------------------------------------------------
--- ** HTTP utils
--------------------------------------------------------------------------------
-
-{-
-httpGetString :: MonadIO m => String -> m (Response BL.ByteString)
-httpGetString url = liftIO $ withManager $ \man -> do
-    initReq <- parseUrl url
-    let req = initReq { requestHeaders = (htitle, buagent)
-                                         : requestHeaders req
-                      }
-    httpLbs req man
-  where
-    htitle = CI.mk "User-Agent"
-    buagent = B64.encode $ C8.pack useragent
-    useragent = unwords [
-          "Mozilla/5.0"
-        , "(X11; Linux x86_64;"
-        , "rv:10.0.2)"
-        , "Gecko/20100101"
-        , "Firefox/10.0.2"
-        ]
--}
 
 -------------------------------------------------------------------------------
 -- ** CMemory/Memory utils
