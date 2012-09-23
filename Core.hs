@@ -53,8 +53,8 @@ import System.IO
 
 -- TODO
 -- - Several nicks -> Try until works -? None available -> Something
--- - Several MVars vs One MVar plus try catch reads and puts vs One MVar with a queue of some sort
--- - Recursing function to check timestamps every second.
+-- - forking at timeouts cause several connections if not fast enough. Make a
+--   status for the Server. This will also stop timeout spam.
 -- - Replace `put' with `pas' which takes a (ServersConfig -> Memory ()) function as an argument and attempts to apply it if it fails.
 
 -- XXX
@@ -97,6 +97,14 @@ data ClientMsg = ServerWrite Text Text
 
 data User = User Text Text Text deriving (Show)
 
+data ServerStatus = Connected | Connecting | Disconnected deriving (Show, Eq)
+
+isDisconnected :: Server -> Bool
+isDisconnected s = serverStatus s == Disconnected
+
+isConnecting :: Server -> Bool
+isConnecting s = serverStatus s == Connecting
+
 -- | IRC server data
 data Server = Server { serverURL :: Text
                      , serverPort :: PortNumber
@@ -106,6 +114,7 @@ data Server = Server { serverURL :: Text
                      , serverHandle :: Maybe Handle
                      , serverTStamp :: Int
                      , serverRStamp :: Int
+                     , serverStatus :: ServerStatus
                      } deriving (Show)
 
 -- | Socket clients.
@@ -134,7 +143,7 @@ staticServers = foldr serverMapper M.empty $ KT.serversC KC.config
             ch = M.fromList $ zip (map T.pack chans) (cycle [[]])
             ni = T.pack nick
             ns = T.pack nsp
-        in Server ur po ni ch ns Nothing 0 0
+        in Server ur po ni ch ns Nothing 0 0 Disconnected
 
 -- {{{ Parsers
 parseUser :: Parser (Text, Text, Text)
@@ -250,15 +259,15 @@ connect url = do
     ServersConfig servers cs v <- see
     let mserver = M.lookup url servers
     mserver' <- case mserver of
-        Just (Server u p n c r Nothing t rt) -> liftIO $ do
+        Just (Server u p n c r Nothing t rt s) -> liftIO $ do
             handle <- connectToIRC u p
             T.hPutStrLn handle $ T.unwords ["NICK", n]
             T.hPutStrLn handle $ T.concat ["USER ", n, " 0 * :", n]
-            let server = Server u p n c r (Just handle) t rt
+            let server = Server u p n c r (Just handle) t rt Connecting
             return $ Just server
         Nothing -> return Nothing
     case mserver' of
-        Just server@(Server u p n c r (Just h) t rt) -> do
+        Just server@(Server u p n c r (Just h) t rt s) -> do
             let servers' = M.insert url server servers
             put $ ServersConfig servers' cs v
             void . forkMe $ ircListen u h
@@ -282,7 +291,7 @@ reconnect :: Text -> Memory ()
 reconnect server = do
     mserver <- M.lookup server . serversC <$> see
     case mserver of
-        Just s -> do
+        Just s -> when (isDisconnected s) $ do
             case serverHandle s of
                 Just h -> void $ tryHClose h
                 Nothing -> return ()
@@ -304,7 +313,7 @@ monitorTimeouts :: Memory ()
 monitorTimeouts = forever $ do
     ss <- serversC <$> see
     time <- liftIO $ floor <$> getPOSIXTime
-    forM_ (M.toList ss) $ \(_, server) -> do
+    forM_ (M.toList ss) $ \(_, server) -> unless (isConnecting server) $ do
         let tstamp = time - serverTStamp server
             rstamp = time - serverRStamp server
         case () of
@@ -380,6 +389,18 @@ ircListen server handle = do
                     ircWrite handle $ T.concat ["PONG :", msg]
                     updateRStamp server
                 Welcome -> do
+                    ss <- serversC <$> see
+                    case M.lookup server ss of
+                        Just s -> do
+                            let s' = s { serverStatus = Connected }
+                                ss' = M.insert server s' ss
+                            sc <- see
+                            put $ sc { serversC = ss' }
+                        Nothing -> liftIO $ do
+                            T.putStrLn $ T.unwords [ "ircListen: Welcome:"
+                                                   , server
+                                                   , "not in Config."
+                                                   ]
                     mc <- do
                         servers <- serversC <$> see
                         return $ serverChans <$> M.lookup server servers

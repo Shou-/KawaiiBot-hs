@@ -43,7 +43,6 @@ import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 
 import Network.CGI (urlEncode, urlDecode)
-import Network.Curl
 import Network.HTTP.Conduit
 import Network.HTTP.Conduit.Browser
 
@@ -362,8 +361,8 @@ stringToVar f se ch ni na co
 -- ** HTTP utils
 -------------------------------------------------------------------------------
 
-httpGetResponse :: MonadIO m => String -> m (String, [(String, String)], String, String)
-httpGetResponse url = liftIO $ withManager $ \man -> do
+httpGetResponse' :: MonadIO m => String -> m (String, [(String, String)], String, String)
+httpGetResponse' url = liftIO $ withManager $ \man -> do
     initReq <- parseUrl url
     let req = initReq { requestHeaders = (htitle, useragent)
                                          : requestHeaders initReq
@@ -382,6 +381,18 @@ httpGetResponse url = liftIO $ withManager $ \man -> do
   where
     htitle = "User-Agent"
     useragent = "Mozilla/5.0 (X11; Linux x86_64; rv:10.0.2) Gecko/20100101 Firefox/10.0.2"
+
+httpGetResponse :: MonadIO m => String -> m (String, [(String, String)], String, String)
+httpGetResponse url = do
+    let tryGet :: MonadIO m => m (Either SomeException (String, [(String, String)], String, String))
+        tryGet = liftIO . try $ httpGetResponse' url
+    e <- tryGet
+    case e of
+        Right v -> return v
+        Left e -> do
+            liftIO $ putStr "httpGetResponse: " >> print e
+            return ([],[],[],[])
+
 
 httpGetString :: MonadIO m => String -> m String
 httpGetString url = liftIO $ withManager $ \man -> do

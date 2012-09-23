@@ -49,7 +49,6 @@ import Data.Tuple
 
 import Debug.Trace
 
-import Network.Curl
 import Network.HTTP.Conduit
 import Network.HTTP.Conduit.Browser
 
@@ -363,25 +362,10 @@ help _ str = do
 -- nth message from the whole chatlog.
 findMsg :: [String] -> String -> Memory (Message String)
 findMsg args str = do
-    meta <- asks getMeta
-    logsPath <- asks (logsPathC . getConfig)
-    let path = logsPath ++ getServer meta ++ " " ++ getDestino meta
-        (strs, filters) = foldr' sepFilterText ([], []) . T.words $ T.pack str
+    msgs <- logMsgs
+    let (strs, filters) = foldr' sepFilterText ([], []) . T.words $ T.pack str
         searchF x = all (`T.isInfixOf` trd3 x) strs
         filterF x = not $ any (`T.isInfixOf` trd3 x) filters
-    cs <- liftIO $ TL.readFile path
-    let msgs :: [(T.Text, T.Text, T.Text)]
-        msgs = do
-            line <- reverse $ TL.lines cs
-            let mresult = ATL.maybeResult . (flip ATL.parse) line $ do
-                    time <- ATL.takeWhile1 (/= '\t')
-                    ATL.char '\t'
-                    nick <- ATL.takeWhile1 (/= '\t')
-                    ATL.char '\t'
-                    msg <- ATL.takeWhile1 (/= '\n')
-                    return (time, nick, msg)
-            guard $ isJust mresult
-            return $ fromJust mresult
         searchh :: [(T.Text, T.Text, T.Text)]
         searchh = do
             msg <- msgs
@@ -396,6 +380,40 @@ findMsg args str = do
                 then return . T.unpack . trd3 $ searchh !! n
                 else EmptyMsg
     return msg
+
+leRandom :: [String] -> String -> Memory (Message String)
+leRandom _ _ = do
+    msgs <- logMsgs
+    a <- liftIO $ randomRIO (0, length msgs - 1)
+    let m1 = T.words . trd3 $ msgs !! a
+    b <- liftIO $ randomRIO (0, length m1 - 4)
+    let w1 = T.unpack $ T.unwords $ take 3 $ drop b m1
+    c <- liftIO $ randomRIO (0, 5)
+    if c /= (0 :: Int)
+        then do
+            w2 <- fromMsg <$> leRandom [] []
+            return . ChannelMsg $ unwords [w1, w2]
+        else return $ ChannelMsg w1
+
+logMsgs :: Memory [(T.Text, T.Text, T.Text)]
+logMsgs = do
+    meta <- asks getMeta
+    logsPath <- asks (logsPathC . getConfig)
+    let path = logsPath ++ getServer meta ++ " " ++ getDestino meta
+    cs <- liftIO $ TL.readFile path
+    let msgs :: [(T.Text, T.Text, T.Text)]
+        msgs = do
+            line <- reverse $ TL.lines cs
+            let mresult = ATL.maybeResult . (flip ATL.parse) line $ do
+                    time <- ATL.takeWhile1 (/= '\t')
+                    ATL.char '\t'
+                    nick <- ATL.takeWhile1 (/= '\t')
+                    ATL.char '\t'
+                    msg <- ATL.takeWhile1 (/= '\n')
+                    return (time, nick, msg)
+            guard $ isJust mresult
+            return $ fromJust mresult
+    return msgs
 
 -- | Print userlist
 userlist :: [String] -> String -> Memory (Message String)
