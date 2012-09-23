@@ -82,6 +82,11 @@ Prints a random string from the file as defined in `Config.hs`.<br>
 Takes zero arguments.<br>
 Example: `.lewd ++ .lewd ++ .lewd ++ .lewd`
 
+* `.sage`
+Sages a person in the channel.<br>
+Takes one argument, a nick.<br>
+Example: `.sage Shou`
+
 * `.wiki`
 Prints the top paragraph of a Wikipedia article.<br>
 Takes one argument, the article title.<br>
