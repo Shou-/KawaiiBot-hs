@@ -105,6 +105,9 @@ isDisconnected s = serverStatus s == Disconnected
 isConnecting :: Server -> Bool
 isConnecting s = serverStatus s == Connecting
 
+isConnected :: Server -> Bool
+isConnected s = serverStatus s == Connected
+
 -- | IRC server data
 data Server = Server { serverURL :: Text
                      , serverPort :: PortNumber
@@ -277,7 +280,6 @@ connect url = do
                                             , url
                                             , "does not exist in Config."
                                             ]
-            return ()
   where
     connectToIRC url p = liftIO $ do
         handle <- liftIO $ connectTo (T.unpack url) $ PortNumber p
@@ -291,13 +293,14 @@ reconnect :: Text -> Memory ()
 reconnect server = do
     mserver <- M.lookup server . serversC <$> see
     case mserver of
-        Just s -> when (isDisconnected s) $ do
+        Just s -> when (isDisconnected s || isConnected s) $ do
             case serverHandle s of
                 Just h -> void $ tryHClose h
                 Nothing -> return ()
-            let s' = s { serverHandle = Nothing }
+            let s' = s { serverHandle = Nothing, serverStatus = Disconnected }
             ServersConfig ss cc vv <- see
-            put $ ServersConfig (M.insert server s' ss) cc vv
+            let ss' = M.insert server s' ss
+            put $ ServersConfig ss' cc vv
             connect server
         Nothing -> liftIO . T.putStrLn $ T.unwords [ "reconnect:"
                                                    , server
@@ -585,7 +588,7 @@ initConnects = do
     forkMe $ socketListen sock
     forkMe monitorTimeouts
     serverurls <- M.keys . serversC <$> see
-    forM_ serverurls connect
+    forM_ serverurls (forkMe . connect)
 
 keyboardInput :: Memory ()
 keyboardInput = do
