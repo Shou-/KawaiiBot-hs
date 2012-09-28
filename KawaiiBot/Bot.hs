@@ -173,6 +173,8 @@ run x px =
         | cmd `isCmd` "e" -> -- Mueval
             allowThen allowMueval $
                 heval args string
+        | cmd `isCmd` "slap" -> -- Slap
+            slap args string
         | x `isCTCP` "VERSION" -> -- CTCP VERSION message
                 return . UserMsg $ "VERSION " ++ botversion
         | otherwise -> return EmptyMsg
@@ -418,6 +420,30 @@ logMsgs = do
 -- | Print userlist
 userlist :: [String] -> String -> Memory (Message String)
 userlist _ _ = asks $ ChannelMsg . unwords . getUserlist . getMeta
+
+slap :: [String] -> String -> Memory (Message String)
+slap _ str = do
+    meta <- asks $ getMeta
+    slapPath <- asks (slapPathC . getConfig)
+    slaps <- liftIO . fmap lines $ readFile slapPath
+    let nonSlaps = do
+            (x, xs) <- parseConf slaps
+            guard . not $ x `insEq` "slaps"
+            guard $ length xs > 0
+            return (x, xs)
+        us = getUserlist meta
+        nick = getUsernick meta
+        nick2 = if str `insElem` us
+            then fromJust $ listToMaybe $ filter (insEq str) us
+            else str
+    obj <- fmap ([("nick1", nick), ("nick2", nick2)] ++) $ forM nonSlaps $ \(x, xs) -> do
+        n <- liftIO $ randomRIO (0, length xs - 1)
+        return $ (x, xs !! n)
+    let slaps' = fromJust $ lookup "slaps" (parseConf slaps) <|> Just []
+    ln <- liftIO $ randomRIO (0, length slaps' - 1)
+    case () of
+      _ | null slaps' -> return EmptyMsg
+        | otherwise -> return . ChannelMsg $ (slaps' !! ln) % obj
 
 -- | Output lewd strings.
 lewd :: [String] -> String -> Memory (Message String)

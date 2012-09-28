@@ -162,6 +162,8 @@ data Config = Config { serversC :: [Server]
                     -- ^ Path of the file read by `KawaiiBot.Bot.yuri'.
                      , sagePathC :: FilePath
                     -- ^ Path of the file read by `KawaiiBot.Bot.sage'.
+                     , slapPathC :: FilePath
+                    -- ^ Path of the file read by `KawaiiBot.Bot.slap'.
                      , logsPathC :: FilePath
                     -- ^ Directory where log files are stored.
                      , variablePathC :: FilePath
@@ -182,6 +184,7 @@ dConfig = Config { serversC = []
                  , lewdPathC = "lewds"
                  , yuriPathC = "yuri"
                  , sagePathC = "sage"
+                 , slapPathC = "slap"
                  , logsPathC = "log"
                  , variablePathC = "variables"
                  , msAppIdC = ""

@@ -53,14 +53,17 @@ import System.IO
 
 -- TODO
 -- - Several nicks -> Try until works -? None available -> Something
--- - forking at timeouts cause several connections if not fast enough. Make a
---   status for the Server. This will also stop timeout spam.
--- - Replace `put' with `pas' which takes a (ServersConfig -> Memory ()) function as an argument and attempts to apply it if it fails.
+-- - Replace `put' with `pas' which takes a (ServersConfig -> Memory ())
+--   function as an argument and attempts to apply it if it fails.
+-- - Replace `see' and `put' with `get' and `fill' where possible.
 
 -- XXX
 -- - We can assume that the server exists if invoked from a function that
 --   holds a server. Instead, pass the server. Stop using Map lookups
 --   everywhere.
+
+-- FIXME
+-- - Delay before response after connecting to servers.
 
 -- {{{ data
 data IRCMsg = Privmsg User Text Text
@@ -92,6 +95,9 @@ data ClientMsg = ServerWrite Text Text
                -- ^ ServerWrite Server Message
                | GetUserlist Text Text
                -- ^ GetUserlist Server Channel
+               | GetStatus
+               -- ^ Sends the status of Kawaiibot, such as servers and channels
+               -- that it is connected to.
                | VoidClientMsg
                deriving (Show)
 
@@ -147,6 +153,18 @@ staticServers = foldr serverMapper M.empty $ KT.serversC KC.config
             ni = T.pack nick
             ns = T.pack nsp
         in Server ur po ni ch ns Nothing 0 0 Disconnected
+
+-- {{{ Debugging
+
+errorLog :: FilePath
+errorLog = KT.errorPathC KC.config ++ "core-errors.log"
+
+putError :: [Text] -> Memory ()
+putError ts = liftIO $ do
+    T.appendFile errorLog $ T.unwords ts `T.snoc` '\n'
+    T.putStrLn $ T.unwords ts
+
+-- }}}
 
 -- {{{ Parsers
 parseUser :: Parser (Text, Text, Text)
@@ -207,8 +225,11 @@ parseIRCMsg = regular <|> status
                 A.char ':'
                 msg <- A.takeText
                 return $ Pong msg
-            "003" -> do
-                return Welcome
+            "001" -> return Welcome
+            "002" -> return Welcome
+            "003" -> return Welcome
+            "004" -> return Welcome
+            "005" -> return Welcome
             "353" -> do
                 A.takeWhile1 (/= ' ')
                 A.string " = "
@@ -253,33 +274,32 @@ parseClientMsg = do
             A.char ':'
             channel <- A.takeText
             return $ GetUserlist server channel
+        "getstatus" -> do
+            A.takeText
+            return GetStatus
         _ -> return VoidClientMsg
 -- }}}
 
 -- {{{ IRC
 connect :: Text -> Memory ()
 connect url = do
-    ServersConfig servers cs v <- see
+    servers <- serversC <$> see
     let mserver = M.lookup url servers
-    mserver' <- case mserver of
-        Just (Server u p n c r Nothing t rt s) -> liftIO $ do
+    case mserver of
+        Just (Server u p n c r Nothing t rt s) -> do
             handle <- connectToIRC u p
-            T.hPutStrLn handle $ T.unwords ["NICK", n]
-            T.hPutStrLn handle $ T.concat ["USER ", n, " 0 * :", n]
+            ircWrite url handle $ T.unwords ["NICK", n]
+            ircWrite url handle $ T.concat ["USER ", n, " 0 * :", n]
+            sc <- get
             let server = Server u p n c r (Just handle) t rt Connecting
-            return $ Just server
-        Nothing -> return Nothing
-    case mserver' of
-        Just server@(Server u p n c r (Just h) t rt s) -> do
-            let servers' = M.insert url server servers
-            put $ ServersConfig servers' cs v
-            void . forkMe $ ircListen u h
+            let servers' = M.insert url server $ serversC sc
+            fill $ sc { serversC = servers' }
+            void . forkMe $ ircListen u handle
         _ -> do
-            -- Server does not exist in Config
-            liftIO . T.putStrLn $ T.unwords [ "connect:"
-                                            , url
-                                            , "does not exist in Config."
-                                            ]
+            putError [ "connect:"
+                     , url
+                     , "does not exist in Config."
+                     ]
   where
     connectToIRC url p = liftIO $ do
         handle <- liftIO $ connectTo (T.unpack url) $ PortNumber p
@@ -295,17 +315,23 @@ reconnect server = do
     case mserver of
         Just s -> when (isDisconnected s || isConnected s) $ do
             case serverHandle s of
-                Just h -> void $ tryHClose h
-                Nothing -> return ()
+                Just h -> do
+                    e <- tryHClose h
+                    either (putError . (: []) . T.pack . show) return e
+                Nothing -> do
+                    putError [ "reconnect:"
+                             , server
+                             , "doesn't have a handle."
+                             ]
             let s' = s { serverHandle = Nothing, serverStatus = Disconnected }
             ServersConfig ss cc vv <- see
             let ss' = M.insert server s' ss
             put $ ServersConfig ss' cc vv
             connect server
-        Nothing -> liftIO . T.putStrLn $ T.unwords [ "reconnect:"
-                                                   , server
-                                                   , "does not exist in Config."
-                                                   ]
+        Nothing -> putError [ "reconnect:"
+                            , server
+                            , "does not exist in Config."
+                            ]
   where
     tryHClose :: Handle -> Memory (Either SomeException ())
     tryHClose = liftIO . try . hClose
@@ -316,29 +342,29 @@ monitorTimeouts :: Memory ()
 monitorTimeouts = forever $ do
     ss <- serversC <$> see
     time <- liftIO $ floor <$> getPOSIXTime
-    forM_ (M.toList ss) $ \(_, server) -> unless (isConnecting server) $ do
+    forM_ (M.toList ss) $ \(s, server) -> unless (isConnecting server) $ do
         let tstamp = time - serverTStamp server
             rstamp = time - serverRStamp server
         case () of
           _ | tstamp > 185 && rstamp < 180 -> case serverHandle server of
-                Just h -> void . forkMe $ ircWrite h "PING irc.adelais.net"
+                Just h -> void . forkMe $ ircWrite s h "PING irc.adelais.net"
                 Nothing -> do
-                    liftIO . T.putStrLn $ T.unwords [ "monitorTimeouts:"
-                                                    , serverURL server
-                                                    , "has no Handle."
-                                                    ]
+                    putError [ "monitorTimeouts:"
+                             , s
+                             , "has no Handle."
+                             ]
                     void . forkMe $ reconnect $ serverURL server
             | tstamp + rstamp > 370 -> do
-                liftIO . T.putStrLn $ T.unwords [ "monitorTimeouts:"
-                                                , serverURL server
-                                                , "timed out. R + T."
-                                                ]
+                putError [ "monitorTimeouts:"
+                         , s
+                         , "timed out. R + T."
+                         ]
                 void . forkMe $ reconnect $ serverURL server
             | tstamp > 200 -> do
-                liftIO . T.putStrLn $ T.unwords [ "monitorTimeouts:"
-                                                , serverURL server
-                                                , "timed out. T."
-                                                ]
+                putError [ "monitorTimeouts:"
+                         , s
+                         , "timed out. T."
+                         ]
                 void . forkMe $ reconnect $ serverURL server
             | otherwise -> return ()
     liftIO $ threadDelay $ 10^6
@@ -355,8 +381,7 @@ ircListen server handle = do
             liftIO $ print line
             let ircmsg = A.parse parseIRCMsg line
             case resultToMessage ircmsg of
-                Privmsg (User nick name host) dest msg -> do
-                    clientsWrite $ T.concat [server, T.pack . TL.unpack $ line]
+                Privmsg (User nick name host) dest msg -> return ()
                 Join (User nick name host) dest -> do
                     modUserlist (nick :) server dest
                 Part (User nick name host) dest msg -> do
@@ -366,57 +391,76 @@ ircListen server handle = do
                     case mserver of
                         Just s -> forM_ (M.keys $ serverChans s) $ \chan -> do
                             modUserlist (filter (/= nick)) server chan
-                        Nothing -> liftIO $ do
-                            T.putStrLn $ T.unwords [ "ircListen:"
-                                                   , server
-                                                   , "not in Servers."
-                                                   ]
+                        Nothing -> do
+                            putError [ "ircListen:"
+                                     , server
+                                     , "not in Servers."
+                                     ]
                 Nick (User nick name host) newnick -> do
                     mserver <- M.lookup server . serversC <$> see
                     case mserver of
                         Just s -> do
                             forM_ (M.keys $ serverChans s) $ \chan -> do
                                 let f xs = if nick `elem` xs
-                                        then newnick : filter (/= nick) xs
-                                        else xs
+                                            then newnick : filter (/= nick) xs
+                                            else xs
                                 modUserlist f server chan
-                        Nothing -> return ()
+                        Nothing -> do
+                            putError [ "ircListen:"
+                                     , server
+                                     , "not in Servers."
+                                     ]
                 Userlist dest users -> do
-                    clientsWrite $ T.concat [ "getuserlist "
-                                            , server, " "
-                                            , dest, ":"
-                                            , T.unwords users
-                                            ]
+                    sc <- get
+                    let mserver = M.lookup server . serversC $ sc
+                    case mserver of
+                        Just s -> do
+                            let f (k, v) = if T.toLower k == T.toLower dest
+                                    then (dest, v)
+                                    else (k, v)
+                                us' = map f (M.toList $ serverChans s)
+                                s' = s { serverChans = M.fromList us' }
+                                ss' = M.insert server s' $ serversC sc
+                            fill $ sc { serversC = ss' }
+                        Nothing -> do
+                            fill sc
+                            putError [ "ircListen:"
+                                     , server
+                                     , "not in Servers."
+                                     ]
                     modUserlist (\_ -> users) server dest
                 Ping msg -> do
-                    ircWrite handle $ T.concat ["PONG :", msg]
+                    ircWrite server handle $ T.concat ["PONG :", msg]
                     updateRStamp server
                 Welcome -> do
                     ss <- serversC <$> see
                     case M.lookup server ss of
-                        Just s -> do
+                        Just s -> when (serverStatus s == Connecting) $ do
                             let s' = s { serverStatus = Connected }
                                 ss' = M.insert server s' ss
                             sc <- see
                             put $ sc { serversC = ss' }
-                        Nothing -> liftIO $ do
-                            T.putStrLn $ T.unwords [ "ircListen: Welcome:"
-                                                   , server
-                                                   , "not in Config."
-                                                   ]
+                        Nothing -> do
+                            putError [ "ircListen: Welcome:"
+                                     , server
+                                     , "not in Config."
+                                     ]
                     mc <- do
                         servers <- serversC <$> see
                         return $ serverChans <$> M.lookup server servers
                     let c = fromJust $ mc <|> Just M.empty
                     forM_ (M.keys c) $ \channel -> liftIO $ do
                         T.hPutStrLn handle $ T.unwords ["JOIN", channel]
-                _ -> do
-                    clientsWrite $ T.concat [server, T.pack . TL.unpack $ line]
+                _ -> return ()
+            let cleanline = T.dropWhile (== ':') . T.pack . TL.unpack $ line
+            clientsWrite $ T.concat [ server, ":", cleanline ]
             updateTStamp server
             ircListen server handle
         Left e -> do
             -- Could not get line from handle
-            liftIO $ putStr "ircListen: " >> print e
+            putError [ "ircListen: "
+                     , T.pack $ show e
+                     ]
             reconnect server
   where
     resultToMessage (Done _ x) = x
@@ -432,8 +476,8 @@ updateTStamp s = do
             let server' = server { serverTStamp = time }
                 servers = M.insert s server' ss
             put $ ServersConfig servers cc vv
-        Nothing -> liftIO $ do
-            T.putStrLn $ T.unwords ["updateTStamp:", s, "not in ServersConfig."]
+        Nothing -> do
+            putError ["updateTStamp:", s, "not in ServersConfig."]
 
 updateRStamp :: Text -> Memory ()
 updateRStamp s = do
@@ -445,13 +489,13 @@ updateRStamp s = do
             let server' = server { serverRStamp = time }
                 servers = M.insert s server' ss
             put $ ServersConfig servers cc vv
-        Nothing -> liftIO $ do
-            T.putStrLn $ T.unwords ["updateRStamp:", s, "not in ServersConfig."]
+        Nothing -> do
+            putError ["updateRStamp:", s, "not in ServersConfig."]
 
 modUserlist :: ([Text] -> [Text]) -> Text -> Text -> Memory ()
 modUserlist f s c = do
-    ServersConfig ss cc vv <- see
-    let mserver = M.lookup s ss
+    sc <- get
+    let mserver = M.lookup s $ serversC sc
     case mserver of
         Just server -> do
             let mchan = M.lookup c $ serverChans server
@@ -460,18 +504,31 @@ modUserlist f s c = do
                     let chan' = f chan
                         chans = M.insert c chan' $ serverChans server
                         server' = server { serverChans = chans }
-                        servers = M.insert s server' ss
+                        servers = M.insert s server' $ serversC sc
                     liftIO $ print server'
-                    put $ ServersConfig servers cc vv
-                Nothing -> liftIO $ do
-                    T.putStrLn $ T.unwords ["modUserlist:", c, "not in", s]
-        Nothing -> liftIO $ do
-            T.putStrLn $ T.unwords ["modUserlist:", s, "not in ServersConfig."]
+                    fill $ sc { serversC = servers }
+                Nothing -> do
+                    fill sc
+                    putError ["modUserlist:", c, "not in", s]
+        Nothing -> do
+            fill sc
+            putError ["modUserlist:", s, "not in ServersConfig."]
 
-ircWrite :: Handle -> Text -> Memory ()
-ircWrite h t = liftIO $ do
-    putStr "<- " >> T.putStrLn t
-    T.hPutStrLn h t
+ircWrite :: Text -> Handle -> Text -> Memory ()
+ircWrite s h t = do
+    liftIO $ putStr "<- " >> T.putStrLn t
+    let tryPut :: Memory (Either SomeException ())
+        tryPut = liftIO . try $ T.hPutStrLn h t
+    e <- tryPut
+    case e of
+        Right _ -> return ()
+        Left e -> do
+            putError [ "ircWrite:"
+                     , T.pack $ show e ++ "."
+                     , "Reconnecting to"
+                     , s
+                     ]
+            reconnect s
 -- }}}
 
 -- {{{ Client
@@ -494,9 +551,24 @@ clientsWrite t = do
 removeClient :: Handle -> Memory ()
 removeClient handle = do
     ServersConfig s (time, clients) v <- see
-    let clients' = filter ((/= handle) . snd) clients
+    let f c@(ho, ha) acc = if ha == handle
+                            then (Just ha, snd acc)
+                            else fmap (c :) acc
+        (mclient, clients') = foldr f (Nothing, []) clients
+    case mclient of
+        Just ha -> do
+            e <- tryHClose ha
+            case e of
+                Right _ -> return ()
+                Left e -> putError [ "removeClient", T.pack $ show e ]
+        Nothing -> putError [ T.pack $ show handle
+                            , "not found in Config"
+                            ]
     time' <- liftIO $ floor <$> getPOSIXTime
     put $ ServersConfig s (time', clients') v
+  where
+    tryHClose :: Handle -> Memory (Either SomeException ())
+    tryHClose = liftIO . try . hClose
 
 clientListen :: HostName -> Handle -> Memory ()
 clientListen host handle = do
@@ -511,17 +583,19 @@ clientListen host handle = do
                         Just server -> do
                             case serverHandle server of
                                 Just handle -> do
-                                    ircWrite handle msg
+                                    ircWrite serverurl handle msg
                                     updateRStamp serverurl
-                                Nothing -> liftIO $ do 
-                                    T.putStrLn $ T.unwords [ "clientListen:"
-                                                           , "No handle found:"
-                                                           , serverurl
-                                                           ]
-                        Nothing -> liftIO $ do
-                            T.putStrLn $ T.unwords [ "clientListen: ServerWrite"
-                                                   , serverurl
-                                                   , "not in Servers" ]
+                                Nothing -> do
+                                    putError [ "clientListen:"
+                                             , "No handle found:"
+                                             , serverurl
+                                             ]
+                                    reconnect serverurl
+                        Nothing -> do
+                            putError [ "clientListen: ServerWrite"
+                                     , serverurl
+                                     , "not in Servers"
+                                     ]
                 GetUserlist serverurl chan -> do
                     mserver <- M.lookup serverurl . serversC <$> see
                     case mserver of
@@ -534,21 +608,30 @@ clientListen host handle = do
                                                             , chan, ":"
                                                             , users'
                                                             ]
-                                Nothing -> liftIO $ do
-                                    T.putStrLn $ T.unwords [ chan
-                                                           , "not in channels."
-                                                           ]
-                        Nothing -> liftIO $ do
-                            T.putStrLn $ T.unwords [ "clientListen: GetUserlist"
-                                                   , serverurl
-                                                   , "not in Servers" ]
+                                Nothing -> do
+                                    putError [ chan
+                                             , "not in channels."
+                                             ]
+                        Nothing -> do
+                            putError [ "clientListen: GetUserlist"
+                                     , serverurl
+                                     , "not in Servers"
+                                     ]
+                GetStatus -> do
+                    time <- liftIO $ floor <$> getPOSIXTime
+                    sc <- see
+                    putError [ T.pack $ show time
+                             , ":"
+                             , T.pack $ show sc
+                             ]
                 _ -> do
-                    liftIO $ do
-                        putStr "clientListen: VoidClientMsg: "
-                        print line
+                    putError [ "clientListen: VoidClientMsg: "
+                             , T.pack . TL.unpack $ line
+                             ]
             clientListen host handle
         Left e -> do
-            liftIO $ putStr "clientListen: " >> print e
+            putError [ "clientListen: ", T.pack $ show e ]
+            removeClient handle
   where
     tryGetLine :: Handle -> Memory (Either SomeException TL.Text)
     tryGetLine = liftIO . try . TL.hGetLine
@@ -593,14 +676,15 @@ initConnects = do
 keyboardInput :: Memory ()
 keyboardInput = do
     line <- liftIO TL.getLine
-    let ircmsg = A.parse parseIRCMsg line
-    case ircmsg of
+    let cmsg = A.parse parseClientMsg line
+    case cmsg of
         Done x y -> liftIO $ print y
-        _ -> liftIO $ print ircmsg
+        _ -> liftIO $ print cmsg
     keyboardInput
 
 main :: IO ()
 main = withSocketsDo $ do
+    tryWipe
     tsp <- floor <$> getPOSIXTime
     let verbosity = KT.verbosityC KC.config
         servers = flip M.map staticServers $ \s -> s { serverTStamp = tsp
@@ -609,9 +693,20 @@ main = withSocketsDo $ do
     configMVar <- atomically . newTMVar $ ServersConfig servers (tsp, []) verbosity
     forkIO $ runReaderT initConnects configMVar
     runReaderT keyboardInput configMVar
+  where
+    tryWipe :: IO ()
+    tryWipe = do
+        e <- try $ writeFile errorLog "" :: IO (Either SomeException ())
+        either print return e
 
 put :: ServersConfig -> Memory ()
 put s = ask >>= void . liftIO . atomically . flip swapTMVar s
 
+fill :: ServersConfig -> Memory ()
+fill s = ask >>= void . liftIO . atomically . flip putTMVar s
+
 see :: Memory ServersConfig
 see = ask >>= liftIO . atomically . readTMVar
+
+get :: Memory ServersConfig
+get = ask >>= liftIO . atomically . takeTMVar

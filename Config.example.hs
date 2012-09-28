@@ -155,6 +155,9 @@ config =    -- file where variables are stored by the `.$' function.
             -- directory where logs are stored.
             , logsPathC     = storagePath ++ "logs/"
 
+            -- path where errors are logged.
+            , errorPathC     = storagePath
+
             , msAppIdC      = ""
 
             -- events
