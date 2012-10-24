@@ -1,6 +1,7 @@
 
+-- {{{ License
 {-
-A lewd IRC bot that does useless things.
+A kawaii IRC bot that does useless things.
 Copyright (C) 2012 Shou
 
 This program is free software; you can redistribute it and/or
@@ -16,8 +17,14 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -}
+-- }}}
 
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DoAndIfThenElse #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Main where
 
@@ -44,18 +51,22 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.IO as TL
+import Data.Time.Format
+import Data.Time.Clock
 import Data.Time.Clock.POSIX
+import Data.Tuple
 
 import Network
 
 import System.IO
+import System.IO.Error (isEOFError, IOError)
+import System.Locale
+import System.Timeout
 -- }}}
 
 -- TODO
--- - Several nicks -> Try until works -? None available -> Something
--- - Replace `put' with `pas' which takes a (ServersConfig -> Memory ())
---   function as an argument and attempts to apply it if it fails.
--- - Replace `see' and `put' with `get' and `fill' where possible.
+-- - Several nicks -> Try until works -? None available -> append timestamp
+-- - User MODEs being kept in the userlist.
 
 -- XXX
 -- - We can assume that the server exists if invoked from a function that
@@ -64,8 +75,44 @@ import System.IO
 
 -- FIXME
 -- - Delay before response after connecting to servers.
+-- - Reconnecting doesn't work. Retries forever. Probably related to the Status.
+--   In `connect', change the status to 'Connecting' before trying to connect
+--   to the IRC server. Also, add a timestamp to 'Connecting' so that we can
+--   retry if it takes too long. (15 sec)
+-- - >hGetLine: invalid argument (invalid byte sequence)
+--   what the hold hands
+--   >you are better off reading IRC as binary, then micro-decode each small chunk and do your fine-grain error handling
+--   >e.g. the iconv package gives quite a bit of control over how to handle invalid encodings
 
--- {{{ data
+-- {{{ Data
+
+class Replaceable a b where
+    pas :: a -> b -> Memory ()
+
+instance Replaceable (Server -> Server) Text where
+    pas f server = do
+        mvar <- ask
+        e <- liftIO . atomically $ do
+            sc <- takeTMVar mvar
+            let ms = M.lookup server $ serversC sc
+            flip (maybe . return $ Left ()) ms $ \s -> do
+                let ss = M.insert server (f s) $ serversC sc
+                putTMVar mvar $ sc { serversC = ss }
+                return $ Right ()
+        flip (flip either return) e . const $ do
+            putError [ "pas:"
+                     , server
+                     , "not found in Servers."
+                     ]
+
+instance Replaceable ([Client] -> [Client]) Int where
+    pas f t = do
+        mvar <- ask
+        liftIO . atomically $ do
+            sc <- takeTMVar mvar
+            let cs = let (_, cs) = clientsC sc in (t, f cs)
+            putTMVar mvar $ sc { clientsC = cs }
+
 data IRCMsg = Privmsg User Text Text
             -- ^ Privmsg User Destination Message
             | Join User Text
@@ -101,15 +148,27 @@ data ClientMsg = ServerWrite Text Text
                | VoidClientMsg
                deriving (Show)
 
+-- | User Nick Name Host. Used in other data such as IRCMsg.
 data User = User Text Text Text deriving (Show)
 
-data ServerStatus = Connected | Connecting | Disconnected deriving (Show, Eq)
+-- | Status of the server. Used in `Server' data.
+data ServerStatus = Connected
+                  | Connecting Int
+                  | Disconnected
+                  deriving (Show, Eq)
 
 isDisconnected :: Server -> Bool
 isDisconnected s = serverStatus s == Disconnected
 
 isConnecting :: Server -> Bool
-isConnecting s = serverStatus s == Connecting
+isConnecting s = case serverStatus s of
+    Connecting _ -> True
+    _ -> False
+
+connectingTime :: Server -> Int -> Bool
+connectingTime s t = case serverStatus s of
+    Connecting t' -> t > t'
+    _ -> False
 
 isConnected :: Server -> Bool
 isConnected s = serverStatus s == Connected
@@ -121,8 +180,6 @@ data Server = Server { serverURL :: Text
                      , serverChans :: Map Text [Text]
                      , serverNSPass :: Text
                      , serverHandle :: Maybe Handle
-                     , serverTStamp :: Int
-                     , serverRStamp :: Int
                      , serverStatus :: ServerStatus
                      } deriving (Show)
 
@@ -132,16 +189,24 @@ type Client = (Text, Handle)
 -- | Last modified timestamp, list of `Client's.
 type Clients = (Int, [Client])
 
+-- | Servers config. Contains IRC servers, clients and the verbosity level.
+-- It is used as KawaiiBot's "state", sitting inside a TMVar, which again is
+-- inside a Reader monad.
 data ServersConfig = ServersConfig { serversC :: Map Text Server
                                    , clientsC :: Clients
                                    , verbosityC :: Int
                                    } deriving (Show)
 
+-- | TMVar that KawaiiBot reads to access the `ServersConfig' data.
 type ConfigMVar = TMVar ServersConfig
 
+-- | Memory reader monad, allowing KawaiiBot to access the `ConfigMVar' without
+-- passing it to each function.
 type Memory = ReaderT ConfigMVar IO
 -- }}}
 
+-- | Takes data from `KawaiiBot.config' and converts it into data used here
+-- in the Core.
 staticServers :: Map Text Server
 staticServers = foldr serverMapper M.empty $ KT.serversC KC.config
   where
@@ -152,21 +217,37 @@ staticServers = foldr serverMapper M.empty $ KT.serversC KC.config
             ch = M.fromList $ zip (map T.pack chans) (cycle [[]])
             ni = T.pack nick
             ns = T.pack nsp
-        in Server ur po ni ch ns Nothing 0 0 Disconnected
+        in Server ur po ni ch ns Nothing Disconnected
 
 -- {{{ Debugging
 
+-- | File where error messages go.
 errorLog :: FilePath
 errorLog = KT.errorPathC KC.config ++ "core-errors.log"
 
+-- | Put an error message into the `errorLog' file.
 putError :: [Text] -> Memory ()
 putError ts = liftIO $ do
-    T.appendFile errorLog $ T.unwords ts `T.snoc` '\n'
+    ft <- ftext
+    T.appendFile errorLog $ ft `T.snoc` '\n'
+    T.putStrLn ft
+  where
+    t = T.unwords ts
+    timestamp = do
+        time <- getCurrentTime
+        return . T.pack $ formatTime defaultTimeLocale "%H:%M:%S%t" time
+    ftext = flip T.append t <$> timestamp
+
+putVerbose :: [Text] -> Memory ()
+putVerbose ts = liftIO $ do
     T.putStrLn $ T.unwords ts
 
 -- }}}
 
 -- {{{ Parsers
+
+-- | A parser that converts an IRC user in the `nick!name@host` format, to
+-- `User' data.
 parseUser :: Parser (Text, Text, Text)
 parseUser = do
     nick <- A.takeWhile1 (/= '!')
@@ -176,6 +257,7 @@ parseUser = do
     host <- A.takeWhile1 (/= ' ')
     return (nick, name, host)
 
+-- | A parser that parses an IRC message and converts it to `IRCMsg' data.
 parseIRCMsg :: Parser IRCMsg
 parseIRCMsg = regular <|> status
   where
@@ -208,8 +290,7 @@ parseIRCMsg = regular <|> status
                 msg <- A.takeText
                 return $ Kick (user sender) dest kicknick msg
             "NICK" -> do
-                A.char ':'
-                newnick <- A.takeWhile1 (/= ' ')
+                newnick <- A.takeText
                 return $ Nick (user sender) newnick
             "INVITE" -> do
                 dest <- A.takeWhile1 (/= ' ')
@@ -232,7 +313,7 @@ parseIRCMsg = regular <|> status
             "005" -> return Welcome
             "353" -> do
                 A.takeWhile1 (/= ' ')
-                A.string " = "
+                A.string " = " <|> A.string " @ "
                 dest <- A.takeWhile1 (/= ' ')
                 A.string " :"
                 nicks <- A.takeText
@@ -259,6 +340,7 @@ parseIRCMsg = regular <|> status
         Done _ (nick, name, host) -> User nick name host
         _ -> error "parseMsg: user: not a username"
 
+-- | A parser that converts a client message to `ClientMsg' data.
 parseClientMsg :: Parser ClientMsg
 parseClientMsg = do
     cmd <- A.takeWhile1 (/= ' ')
@@ -281,20 +363,37 @@ parseClientMsg = do
 -- }}}
 
 -- {{{ IRC
+
+-- | Connect to an IRC server.
 connect :: Text -> Memory ()
 connect url = do
-    servers <- serversC <$> see
-    let mserver = M.lookup url servers
+    mserver <- M.lookup url . serversC <$> see
     case mserver of
-        Just (Server u p n c r Nothing t rt s) -> do
-            handle <- connectToIRC u p
-            ircWrite url handle $ T.unwords ["NICK", n]
-            ircWrite url handle $ T.concat ["USER ", n, " 0 * :", n]
-            sc <- get
-            let server = Server u p n c r (Just handle) t rt Connecting
-            let servers' = M.insert url server $ serversC sc
-            fill $ sc { serversC = servers' }
-            void . forkMe $ ircListen u handle
+        Just server -> do
+            e <- liftIO . try . timeout (15 * 10 ^ 6) $ do
+                connectToIRC (serverURL server) (serverPort server)
+            case e of
+                Right (Just h) -> do
+                    let n = serverNick server
+                    ircWrite url h $ T.unwords ["NICK", n]
+                    ircWrite url h $ T.concat ["USER ", n, " 0 * :", n]
+                    time <- liftIO $ (15 +) . floor <$> getPOSIXTime
+                    flip pas url $ \s -> s { serverHandle = Just h
+                                           , serverStatus = Connecting time
+                                           }
+                    ircListen (serverURL server) h False
+                Right Nothing -> do
+                    putError [ "connect:"
+                             , url
+                             , "timeout while connecting."
+                             ]
+                    reconnect url
+                Left e -> do
+                    putError [ "connect:"
+                             , T.pack $ show (e :: SomeException)
+                             , "(" `T.append` url `T.append` ")"
+                             ]
+                    reconnect url
         _ -> do
             putError [ "connect:"
                      , url
@@ -313,21 +412,31 @@ reconnect :: Text -> Memory ()
 reconnect server = do
     mserver <- M.lookup server . serversC <$> see
     case mserver of
-        Just s -> when (isDisconnected s || isConnected s) $ do
-            case serverHandle s of
-                Just h -> do
-                    e <- tryHClose h
-                    either (putError . (: []) . T.pack . show) return e
-                Nothing -> do
-                    putError [ "reconnect:"
-                             , server
-                             , "doesn't have a handle."
-                             ]
-            let s' = s { serverHandle = Nothing, serverStatus = Disconnected }
-            ServersConfig ss cc vv <- see
-            let ss' = M.insert server s' ss
-            put $ ServersConfig ss' cc vv
-            connect server
+        Just s -> do
+            putError [ "reconnect:"
+                     , "Reconnecting to"
+                     , server
+                     , '(' `T.cons` T.pack (show $ serverStatus s) `T.snoc` ')'
+                     ]
+            time <- liftIO $ floor <$> getPOSIXTime
+            let shouldReconnect =
+                    isDisconnected s || isConnected s || connectingTime s time
+            if shouldReconnect then do
+                case serverHandle s of
+                    Just h -> do
+                        e <- tryHClose h
+                        either (putError . (: []) . T.pack . show) return e
+                    Nothing -> do
+                        putError [ "reconnect:"
+                                 , server
+                                 , "doesn't have a handle."
+                                 ]
+                let f s = s { serverHandle = Nothing
+                            , serverStatus = Disconnected
+                            }
+                pas f server
+                connect server
+            else reconnect server
         Nothing -> putError [ "reconnect:"
                             , server
                             , "does not exist in Config."
@@ -336,192 +445,110 @@ reconnect server = do
     tryHClose :: Handle -> Memory (Either SomeException ())
     tryHClose = liftIO . try . hClose
 
--- | Monitor IRC server timeouts by checking the last received and sent message
--- timestamps.
-monitorTimeouts :: Memory ()
-monitorTimeouts = forever $ do
-    ss <- serversC <$> see
-    time <- liftIO $ floor <$> getPOSIXTime
-    forM_ (M.toList ss) $ \(s, server) -> unless (isConnecting server) $ do
-        let tstamp = time - serverTStamp server
-            rstamp = time - serverRStamp server
-        case () of
-          _ | tstamp > 185 && rstamp < 180 -> case serverHandle server of
-                Just h -> void . forkMe $ ircWrite s h "PING irc.adelais.net"
-                Nothing -> do
-                    putError [ "monitorTimeouts:"
-                             , s
-                             , "has no Handle."
-                             ]
-                    void . forkMe $ reconnect $ serverURL server
-            | tstamp + rstamp > 370 -> do
-                putError [ "monitorTimeouts:"
-                         , s
-                         , "timed out. R + T."
-                         ]
-                void . forkMe $ reconnect $ serverURL server
-            | tstamp > 200 -> do
-                putError [ "monitorTimeouts:"
-                         , s
-                         , "timed out. T."
-                         ]
-                void . forkMe $ reconnect $ serverURL server
-            | otherwise -> return ()
-    liftIO $ threadDelay $ 10^6
-
 -- | Listen to an IRC `Handle' and then parse the message and respond
 -- appropriately.
-ircListen :: Text -> Handle -> Memory ()
-ircListen server handle = do
-    let tryGetLine :: Memory (Either SomeException TL.Text)
-        tryGetLine = liftIO . try $ TL.hGetLine handle
+--
+-- Its arguments take `Text' containing an IRC server address, an IRC server
+-- handle and a boolean that decides whether or not it should check if the
+-- server has been disconnected.
+ircListen :: Text -> Handle -> Bool -> Memory ()
+ircListen server handle rb = do
+    let tout = if rb then 10 else 240
+        tryGetLine :: Exception e => Memory (Either e (Maybe TL.Text))
+        tryGetLine = liftIO . try . timeout (tout * 10 ^ 6) $ TL.hGetLine handle
     e <- tryGetLine
     case e of
-        Right line -> do
+        Right (Just line) -> do
             liftIO $ print line
             let ircmsg = A.parse parseIRCMsg line
             case resultToMessage ircmsg of
                 Privmsg (User nick name host) dest msg -> return ()
                 Join (User nick name host) dest -> do
-                    modUserlist (nick :) server dest
+                    flip pas server $ \s ->
+                        modUserlist (nick :) s dest
                 Part (User nick name host) dest msg -> do
-                    modUserlist (filter (/= nick)) server dest
+                    flip pas server $ \s ->
+                        modUserlist (filter (/= nick)) s dest
                 Quit (User nick name host) msg -> do
-                    mserver <- M.lookup server . serversC <$> see
-                    case mserver of
-                        Just s -> forM_ (M.keys $ serverChans s) $ \chan -> do
-                            modUserlist (filter (/= nick)) server chan
-                        Nothing -> do
-                            putError [ "ircListen:"
-                                     , server
-                                     , "not in Servers."
-                                     ]
+                    flip pas server $ \s ->
+                        let chans = M.keys $ serverChans s
+                            f c s' =
+                                modUserlist (filter (/= nick)) s' c
+                        in foldr f s chans
                 Nick (User nick name host) newnick -> do
-                    mserver <- M.lookup server . serversC <$> see
-                    case mserver of
-                        Just s -> do
-                            forM_ (M.keys $ serverChans s) $ \chan -> do
-                                let f xs = if nick `elem` xs
+                    flip pas server $ \s ->
+                        let chans = M.keys $ serverChans s
+                            f c s' =
+                                let g xs = if nick `elem` xs
                                             then newnick : filter (/= nick) xs
                                             else xs
-                                modUserlist f server chan
-                        Nothing -> do
-                            putError [ "ircListen:"
-                                     , server
-                                     , "not in Servers."
-                                     ]
+                                in modUserlist g s' c
+                        in foldr f s chans
                 Userlist dest users -> do
-                    sc <- get
-                    let mserver = M.lookup server . serversC $ sc
-                    case mserver of
-                        Just s -> do
-                            let f (k, v) = if T.toLower k == T.toLower dest
-                                    then (dest, v)
-                                    else (k, v)
-                                us' = map f (M.toList $ serverChans s)
-                                s' = s { serverChans = M.fromList us' }
-                                ss' = M.insert server s' $ serversC sc
-                            fill $ sc { serversC = ss' }
-                        Nothing -> do
-                            fill sc
-                            putError [ "ircListen:"
-                                     , server
-                                     , "not in Servers."
-                                     ]
-                    modUserlist (\_ -> users) server dest
+                    flip pas server $ \s ->
+                        let f (k, v) = if T.toLower k == T.toLower dest
+                                then (dest, v)
+                                else (k, v)
+                            us' = map f (M.toList $ serverChans s)
+                            g s' = s' { serverChans = M.fromList us' }
+                        in modUserlist (const users) s dest
                 Ping msg -> do
                     ircWrite server handle $ T.concat ["PONG :", msg]
-                    updateRStamp server
                 Welcome -> do
-                    ss <- serversC <$> see
-                    case M.lookup server ss of
-                        Just s -> when (serverStatus s == Connecting) $ do
-                            let s' = s { serverStatus = Connected }
-                                ss' = M.insert server s' ss
-                            sc <- see
-                            put $ sc { serversC = ss' }
-                        Nothing -> do
-                            putError [ "ircListen: Welcome:"
-                                     , server
-                                     , "not in Config."
-                                     ]
+                    flip pas server $ \s ->
+                        if isConnecting s
+                            then s { serverStatus = Connected }
+                            else s
                     mc <- do
                         servers <- serversC <$> see
                         return $ serverChans <$> M.lookup server servers
-                    let c = fromJust $ mc <|> Just M.empty
-                    forM_ (M.keys c) $ \channel -> liftIO $ do
-                        T.hPutStrLn handle $ T.unwords ["JOIN", channel]
+                    flip (maybe $ return ()) mc $ \cs ->
+                        forM_ (M.keys cs) $ \channel -> liftIO $ do
+                            T.hPutStrLn handle $ T.unwords ["JOIN", channel]
                 _ -> return ()
             let cleanline = T.dropWhile (== ':') . T.pack . TL.unpack $ line
             clientsWrite $ T.concat [ server, ":", cleanline ]
-            updateTStamp server
-            ircListen server handle
+            ircListen server handle False
+        Right Nothing -> do
+            mserver <- M.lookup server . serversC <$> see
+            flip (maybe $ return ()) mserver $ \s -> do
+                if rb then do
+                    putError [ "ircListen:"
+                             , server
+                             , "timed out. Reconnecting..."
+                             ]
+                    reconnect server
+                else do
+                    ircWrite server handle $ T.unwords [ "PING", server ]
+                    ircListen server handle True
         Left e -> do
-            -- Could not get line from handle
             putError [ "ircListen: "
-                     , T.pack $ show e
+                     , T.pack $ show (e :: SomeException)
                      ]
             reconnect server
   where
     resultToMessage (Done _ x) = x
     resultToMessage _ = VoidIRCMsg
 
-updateTStamp :: Text -> Memory ()
-updateTStamp s = do
-    ServersConfig ss cc vv <- see
-    let mserver = M.lookup s ss
-    case mserver of
-        Just server -> do
-            time <- liftIO $ floor <$> getPOSIXTime
-            let server' = server { serverTStamp = time }
-                servers = M.insert s server' ss
-            put $ ServersConfig servers cc vv
-        Nothing -> do
-            putError ["updateTStamp:", s, "not in ServersConfig."]
+-- | Modify the userlist of a channel in a server.
+modUserlist :: ([Text] -> [Text]) -> Server -> Text -> Server
+modUserlist f s c =
+    let mchan = M.lookup c $ serverChans s
+    -- putError ["modUserlist:", c, "not in", s]
+    -- Use Debug.Trace if you need.
+    in flip (maybe s) mchan $ \chan ->
+        let chan' = f chan
+            chans = M.insert c chan' $ serverChans s
+        in s { serverChans = chans }
 
-updateRStamp :: Text -> Memory ()
-updateRStamp s = do
-    ServersConfig ss cc vv <- see
-    let mserver = M.lookup s ss
-    case mserver of
-        Just server -> do
-            time <- liftIO $ floor <$> getPOSIXTime
-            let server' = server { serverRStamp = time }
-                servers = M.insert s server' ss
-            put $ ServersConfig servers cc vv
-        Nothing -> do
-            putError ["updateRStamp:", s, "not in ServersConfig."]
-
-modUserlist :: ([Text] -> [Text]) -> Text -> Text -> Memory ()
-modUserlist f s c = do
-    sc <- get
-    let mserver = M.lookup s $ serversC sc
-    case mserver of
-        Just server -> do
-            let mchan = M.lookup c $ serverChans server
-            case mchan of
-                Just chan -> do
-                    let chan' = f chan
-                        chans = M.insert c chan' $ serverChans server
-                        server' = server { serverChans = chans }
-                        servers = M.insert s server' $ serversC sc
-                    liftIO $ print server'
-                    fill $ sc { serversC = servers }
-                Nothing -> do
-                    fill sc
-                    putError ["modUserlist:", c, "not in", s]
-        Nothing -> do
-            fill sc
-            putError ["modUserlist:", s, "not in ServersConfig."]
-
+-- | Write to an IRC server handle.
 ircWrite :: Text -> Handle -> Text -> Memory ()
 ircWrite s h t = do
-    liftIO $ putStr "<- " >> T.putStrLn t
     let tryPut :: Memory (Either SomeException ())
         tryPut = liftIO . try $ T.hPutStrLn h t
     e <- tryPut
     case e of
-        Right _ -> return ()
+        Right _ -> liftIO $ putStr "<- " >> T.putStrLn t
         Left e -> do
             putError [ "ircWrite:"
                      , T.pack $ show e ++ "."
@@ -550,7 +577,7 @@ clientsWrite t = do
 
 removeClient :: Handle -> Memory ()
 removeClient handle = do
-    ServersConfig s (time, clients) v <- see
+    (time, clients) <- clientsC <$> see
     let f c@(ho, ha) acc = if ha == handle
                             then (Just ha, snd acc)
                             else fmap (c :) acc
@@ -564,8 +591,8 @@ removeClient handle = do
         Nothing -> putError [ T.pack $ show handle
                             , "not found in Config"
                             ]
-    time' <- liftIO $ floor <$> getPOSIXTime
-    put $ ServersConfig s (time', clients') v
+    (time' :: Int) <- liftIO $ floor <$> getPOSIXTime
+    pas (const clients' :: ([Client] -> [Client])) time'
   where
     tryHClose :: Handle -> Memory (Either SomeException ())
     tryHClose = liftIO . try . hClose
@@ -584,7 +611,6 @@ clientListen host handle = do
                             case serverHandle server of
                                 Just handle -> do
                                     ircWrite serverurl handle msg
-                                    updateRStamp serverurl
                                 Nothing -> do
                                     putError [ "clientListen:"
                                              , "No handle found:"
@@ -609,7 +635,8 @@ clientListen host handle = do
                                                             , users'
                                                             ]
                                 Nothing -> do
-                                    putError [ chan
+                                    putError [ "clientListen:"
+                                             , chan
                                              , "not in channels."
                                              ]
                         Nothing -> do
@@ -649,9 +676,8 @@ socketListen sock = do
         -- newline mode to \r\n
         hSetNewlineMode handle (NewlineMode CRLF CRLF)
         putStrLn $ "Client " ++ host ++ " is listening."
-    time <- liftIO $ floor <$> getPOSIXTime
-    ServersConfig ss (tsp, cs) v <- see
-    put $ ServersConfig ss (time, (T.pack host, handle) : cs) v
+    (time :: Int) <- liftIO $ floor <$> getPOSIXTime
+    pas (((T.pack host, handle) :) :: ([Client] -> [Client])) time
     forkMe $ clientListen host handle
     servers <- serversC <$> see
     forM_ (M.toList servers) $ \(serverurl, server) -> do
@@ -665,14 +691,15 @@ socketListen sock = do
     socketListen sock
 -- }}}
 
+-- | Initialize the connections.
 initConnects :: Memory ()
 initConnects = do
     sock <- liftIO . listenOn $ PortNumber 3737
     forkMe $ socketListen sock
-    forkMe monitorTimeouts
     serverurls <- M.keys . serversC <$> see
     forM_ serverurls (forkMe . connect)
 
+-- | Get input from stdin.
 keyboardInput :: Memory ()
 keyboardInput = do
     line <- liftIO TL.getLine
@@ -687,9 +714,7 @@ main = withSocketsDo $ do
     tryWipe
     tsp <- floor <$> getPOSIXTime
     let verbosity = KT.verbosityC KC.config
-        servers = flip M.map staticServers $ \s -> s { serverTStamp = tsp
-                                                     , serverRStamp = tsp
-                                                     }
+        servers = staticServers
     configMVar <- atomically . newTMVar $ ServersConfig servers (tsp, []) verbosity
     forkIO $ runReaderT initConnects configMVar
     runReaderT keyboardInput configMVar
@@ -699,14 +724,6 @@ main = withSocketsDo $ do
         e <- try $ writeFile errorLog "" :: IO (Either SomeException ())
         either print return e
 
-put :: ServersConfig -> Memory ()
-put s = ask >>= void . liftIO . atomically . flip swapTMVar s
-
-fill :: ServersConfig -> Memory ()
-fill s = ask >>= void . liftIO . atomically . flip putTMVar s
-
+-- | See reads the `TMVar', which only works when it is full.
 see :: Memory ServersConfig
 see = ask >>= liftIO . atomically . readTMVar
-
-get :: Memory ServersConfig
-get = ask >>= liftIO . atomically . takeTMVar
