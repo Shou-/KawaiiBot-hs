@@ -69,16 +69,8 @@ import System.Timeout
 -- - User MODEs being kept in the userlist.
 
 -- XXX
--- - We can assume that the server exists if invoked from a function that
---   holds a server. Instead, pass the server. Stop using Map lookups
---   everywhere.
 
 -- FIXME
--- - Delay before response after connecting to servers.
--- - Reconnecting doesn't work. Retries forever. Probably related to the Status.
---   In `connect', change the status to 'Connecting' before trying to connect
---   to the IRC server. Also, add a timestamp to 'Connecting' so that we can
---   retry if it takes too long. (15 sec)
 -- - >hGetLine: invalid argument (invalid byte sequence)
 --   what the hold hands
 --   >you are better off reading IRC as binary, then micro-decode each small chunk and do your fine-grain error handling
@@ -365,8 +357,8 @@ parseClientMsg = do
 -- {{{ IRC
 
 -- | Connect to an IRC server.
-connect :: Text -> Memory ()
-connect url = do
+connect :: Int -> Text -> Memory ()
+connect n url = do
     mserver <- M.lookup url . serversC <$> see
     case mserver of
         Just server -> do
@@ -387,13 +379,13 @@ connect url = do
                              , url
                              , "timeout while connecting."
                              ]
-                    reconnect url
+                    reconnect (n * 2) url
                 Left e -> do
                     putError [ "connect:"
                              , T.pack $ show (e :: SomeException)
                              , "(" `T.append` url `T.append` ")"
                              ]
-                    reconnect url
+                    reconnect ((if n <= 0 then 1 else n) * 2) url
         _ -> do
             putError [ "connect:"
                      , url
@@ -408,8 +400,10 @@ connect url = do
         return handle
 
 -- | Reconnect to an IRC server.
-reconnect :: Text -> Memory ()
-reconnect server = do
+reconnect :: Int -> Text -> Memory ()
+reconnect n server = do
+    let n' = if n >= 64 then 64 else n
+    liftIO $ threadDelay (n' * 10 ^ 6)
     mserver <- M.lookup server . serversC <$> see
     case mserver of
         Just s -> do
@@ -435,8 +429,8 @@ reconnect server = do
                             , serverStatus = Disconnected
                             }
                 pas f server
-                connect server
-            else reconnect server
+                connect n' server
+            else reconnect n' server
         Nothing -> putError [ "reconnect:"
                             , server
                             , "does not exist in Config."
@@ -517,7 +511,7 @@ ircListen server handle rb = do
                              , server
                              , "timed out. Reconnecting..."
                              ]
-                    reconnect server
+                    reconnect 0 server
                 else do
                     ircWrite server handle $ T.unwords [ "PING", server ]
                     ircListen server handle True
@@ -525,7 +519,7 @@ ircListen server handle rb = do
             putError [ "ircListen: "
                      , T.pack $ show (e :: SomeException)
                      ]
-            reconnect server
+            reconnect 0 server
   where
     resultToMessage (Done _ x) = x
     resultToMessage _ = VoidIRCMsg
@@ -555,7 +549,7 @@ ircWrite s h t = do
                      , "Reconnecting to"
                      , s
                      ]
-            reconnect s
+            reconnect 0 s
 -- }}}
 
 -- {{{ Client
@@ -616,7 +610,7 @@ clientListen host handle = do
                                              , "No handle found:"
                                              , serverurl
                                              ]
-                                    reconnect serverurl
+                                    reconnect 0 serverurl
                         Nothing -> do
                             putError [ "clientListen: ServerWrite"
                                      , serverurl
@@ -697,7 +691,7 @@ initConnects = do
     sock <- liftIO . listenOn $ PortNumber 3737
     forkMe $ socketListen sock
     serverurls <- M.keys . serversC <$> see
-    forM_ serverurls (forkMe . connect)
+    forM_ serverurls (forkMe . connect 0)
 
 -- | Get input from stdin.
 keyboardInput :: Memory ()
