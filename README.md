@@ -1,3 +1,8 @@
+Deprecated
+==========
+
+This bot is old and bad and will soon be replaced.
+
 KawaiiBot Haskell
 =================
 
