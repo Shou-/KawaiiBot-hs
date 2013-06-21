@@ -1,7 +1,7 @@
 Deprecated
 ==========
 
-This bot is old and bad and will soon be replaced.
+Project continued here: https://github.com/Shou-/Tombot
 
 KawaiiBot Haskell
 =================
